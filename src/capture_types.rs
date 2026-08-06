@@ -1,6 +1,6 @@
 //! 后端无关的公共类型与自研后端分发。
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use image::RgbaImage;
 
@@ -57,6 +57,13 @@ pub struct CaptureRequest {
     pub minimum_frame_time_ms: u64,
     /// 无头铁律：恒为 false，任何后端不得触发交互授权。
     pub allow_interactive_portal: bool,
+    /// 截图时是否请求后端隐藏调用方自身窗口。
+    ///
+    /// 语义字段：Wayland portal screencast 无 hide-caller-windows 等价项，
+    /// GNOME 需集成方在截图前应用层隐藏自身 UI（悬浮球/设置窗等）；KWin 的
+    /// hide-caller-windows 因本项目禁用 KWin ScreenShot2 不再涉及。供集成方
+    /// 感知并统一处理。
+    pub hide_own_windows: bool,
     /// 窗口目标（多选）。为空时按屏幕模式截图（全屏/区域/全输出）；
     /// 非空时对每个命中窗口分别截图（每个窗口一张）。
     pub window_matches: Vec<WindowMatch>,
@@ -74,6 +81,7 @@ impl Default for CaptureRequest {
             target_fps: 0,
             minimum_frame_time_ms: 0,
             allow_interactive_portal: false,
+            hide_own_windows: true,
             window_matches: Vec::new(),
             component: None,
         }
@@ -136,9 +144,18 @@ pub fn available_backends() -> Vec<Backend> {
     backends
 }
 
-/// 当前正在使用的流式后端（PipeWire screencast 会话复用）。
-static ACTIVE_PIPEWIRE: Mutex<Option<pipewire_screencast::PipeWireSession>> =
+/// 当前正在使用的流式后端（PipeWire screencast 会话，跨调用共享）。
+static ACTIVE_PIPEWIRE: Mutex<Option<Arc<Mutex<pipewire_screencast::PipeWireSession>>>> =
     Mutex::new(None);
+
+/// 获取（必要时创建）进程内共享的 PipeWire 会话。
+fn shared_pipewire_session() -> Arc<Mutex<pipewire_screencast::PipeWireSession>> {
+    let mut guard = ACTIVE_PIPEWIRE.lock().expect("pipewire session mutex poisoned");
+    if guard.is_none() {
+        *guard = Some(Arc::new(Mutex::new(pipewire_screencast::PipeWireSession::new())));
+    }
+    guard.as_ref().unwrap().clone()
+}
 
 /// 捕获一帧并返回后端无关结果。
 ///
@@ -149,25 +166,26 @@ static ACTIVE_PIPEWIRE: Mutex<Option<pipewire_screencast::PipeWireSession>> =
 ///
 /// 失败时依次回退到下一个后端；全部失败返回错误。
 pub fn capture_frame(request: &CaptureRequest) -> CaptureResult {
-    // 注意：allow_interactive_portal 仅由显式交互流程（--authorize / GUI 集成）
-    // 置 true；无头模式（headless/MCP 等）调用方必须保持 false，本核心不校验。
     let mut errors: Vec<String> = Vec::new();
 
     for backend in available_backends() {
         let result = match backend {
             Backend::WlrScreencopy => wlr_screencopy::capture(request),
             Backend::PipeWireScreencast => {
-                let mut guard = ACTIVE_PIPEWIRE
-                    .lock()
-                    .expect("pipewire session mutex poisoned");
-                match pipewire_screencast::capture_with_session(request, guard.as_mut()) {
+                let shared = shared_pipewire_session();
+                let mut session = shared.lock().unwrap();
+                match pipewire_screencast::capture_with_session(request, &mut session) {
                     Ok(result) => result,
                     Err(need_restart) => {
                         let _ = need_restart;
                         // 会话失效：销毁重建后重试一次。
+                        drop(session);
+                        let mut guard = ACTIVE_PIPEWIRE.lock().unwrap();
                         *guard = None;
-                        let mut fresh = pipewire_screencast::PipeWireSession::new();
-                        pipewire_screencast::capture_with_session(request, Some(&mut fresh))
+                        drop(guard);
+                        let shared = shared_pipewire_session();
+                        let mut session = shared.lock().unwrap();
+                        pipewire_screencast::capture_with_session(request, &mut session)
                             .unwrap_or_else(|e| CaptureResult::failure(Backend::PipeWireScreencast, e))
                     }
                 }
@@ -208,6 +226,77 @@ pub fn stop_active_stream() {
     }
 }
 
+/// 流式捕获（滚动截图逐帧拉取 / 录制连续帧）。
+///
+/// 持有进程内共享的 PipeWire screencast 会话：`start_stream` 时若尚未授权，
+/// 按授权策略弹一次选择器或静默恢复；此后 `next_frame` 持续返回最新帧。
+pub struct Stream {
+    session: Arc<Mutex<pipewire_screencast::PipeWireSession>>,
+    target_fps: u32,
+    last_frame_ms: Mutex<u64>,
+}
+
+/// 启动一个流式捕获会话。
+///
+/// - 返回的 `Stream` 可反复 `next_frame`。
+/// - 授权语义与 `capture_frame` 一致：首次集成方传 `allow_interactive_portal=true`
+///   触发一次授权，此后同进程静默。
+pub fn start_stream(request: &CaptureRequest) -> Result<Stream, String> {
+    let session = shared_pipewire_session();
+    {
+        let mut guard = session.lock().unwrap();
+        pipewire_screencast::ensure_started(request, &mut guard)?;
+    }
+    Ok(Stream {
+        session,
+        target_fps: request.target_fps,
+        last_frame_ms: Mutex::new(0),
+    })
+}
+
+impl Stream {
+    /// 拉取下一帧。
+    ///
+    /// - `min_frame_time_ms`：只返回到达时间 ≥ 该值的帧（滚动隐藏自身 UI 后，
+    ///   用 `now+delay` 丢弃陈旧帧）。
+    /// - `timeout_ms`：等待上限；超时返回 `None`。
+    /// - `target_fps` 节流：相邻两次返回间隔 ≥ 1000/fps 毫秒（录制限帧）。
+    /// - 返回 `(RgbaImage, frame_time_ms)`；帧时间戳供滚动/录制时间线使用。
+    pub fn next_frame(
+        &self,
+        min_frame_time_ms: u64,
+        timeout_ms: u64,
+    ) -> Result<Option<(image::RgbaImage, u64)>, String> {
+        if self.target_fps > 0 {
+            let interval = 1000u64 / self.target_fps.max(1) as u64;
+            let last = *self.last_frame_ms.lock().unwrap();
+            if last > 0 {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let elapsed = now_ms.saturating_sub(last);
+                if elapsed < interval {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        (interval - elapsed).min(timeout_ms),
+                    ));
+                }
+            }
+        }
+        let guard = self.session.lock().unwrap();
+        let frame = pipewire_screencast::next_frame(&guard, min_frame_time_ms, timeout_ms)?;
+        if let Some((_, t)) = frame.as_ref() {
+            *self.last_frame_ms.lock().unwrap() = *t;
+        }
+        Ok(frame)
+    }
+
+    /// 结束流式捕获（释放共享会话，滚动结束/失败时调用）。
+    pub fn stop(&self) {
+        stop_active_stream();
+    }
+}
+
 /// 抓取单个窗口自身内容。不支持或失败返回 None，调用方回退区域抓取。
 pub fn capture_window_object_content(
     window: &WindowObjectInfo,
@@ -237,7 +326,8 @@ pub struct WindowCapture {
 /// - `request.component` 存在时，在每个窗口图上按相对子区域裁剪。
 /// - 无头铁律：不建窗口、不弹窗、不干扰用户其他进程。
 pub fn capture_windows(request: &CaptureRequest) -> Vec<WindowCapture> {
-    let windows = crate::window::list_windows();
+    // 窗口捕获需能定位 PID/进程（含最小化窗口），与 C++ headless 一致。
+    let windows = crate::window::list_windows(true);
     let mut out = Vec::new();
 
     for selector in &request.window_matches {

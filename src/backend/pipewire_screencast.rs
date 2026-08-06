@@ -28,6 +28,8 @@ use pw::spa::utils::{Choice, ChoiceEnum, ChoiceFlags, Id as SpaId};
 /// PipeWire 流线程共享状态。
 struct SharedState {
     latest: Mutex<Option<image::RgbaImage>>,
+    /// 最新帧的到达时间（毫秒，单调时钟）。用于陈旧帧过滤与帧率节流。
+    latest_time_ms: Mutex<u64>,
     error: Mutex<Option<String>>,
     info: Mutex<Option<spa::param::video::VideoInfoRaw>>,
 }
@@ -36,6 +38,7 @@ impl SharedState {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             latest: Mutex::new(None),
+            latest_time_ms: Mutex::new(0),
             error: Mutex::new(None),
             info: Mutex::new(None),
         })
@@ -84,34 +87,12 @@ impl PipeWireSession {
 
 pub(crate) fn capture_with_session(
     request: &CaptureRequest,
-    session: Option<&mut PipeWireSession>,
+    session: &mut PipeWireSession,
 ) -> Result<CaptureResult, String> {
-    let session = match session {
-        Some(s) => s,
-        None => return Err("pipewire session is not initialized".to_string()),
-    };
+    ensure_started(request, session)?;
 
-    if !session.started {
-        // 交互模式：启动会话（会弹一次授权选择器）。
-        // 无头模式（铁律严禁弹窗）：仅当存在持久化恢复 token 时才尝试静默恢复；
-        // 无 token 直接报错，绝不触发选择器。token 失效导致的弹窗由 start 的
-        // 短超时兜底——超时后进程退出会取消 portal 请求并关闭选择器。
-        if !request.allow_interactive_portal && crate::auth::restore_token().is_none() {
-            return Err(
-                "portal screencast requires interactive authorization; run once with the GUI to grant it".to_string(),
-            );
-        }
-        session.start_session(request)?;
-    }
-
-    // 等待/复用最新帧。
-    let state = session.state.as_ref().ok_or("pipewire state missing")?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        if let Some(err) = state.error.lock().unwrap().clone() {
-            return Err(err);
-        }
-        if let Some(image) = state.latest.lock().unwrap().clone() {
+    match next_frame(session, request.minimum_frame_time_ms, 5000)? {
+        Some((image, frame_time)) => {
             // 按请求区域裁剪（流几何 = portal 报告的 position/size）。
             let mut out = image;
             if let Some((rx, ry, rw, rh)) = request.source_geometry {
@@ -125,17 +106,66 @@ pub(crate) fn capture_with_session(
                     }
                 }
             }
-            return Ok(CaptureResult {
+            Ok(CaptureResult {
                 image: Some(out),
                 error: None,
                 source_geometry: request.source_geometry,
                 output_name: None,
                 backend: Backend::PipeWireScreencast,
-                frame_time_ms: 0,
-            });
+                frame_time_ms: frame_time,
+            })
+        }
+        None => Err("pipewire screencast did not produce a frame within 5s".to_string()),
+    }
+}
+
+/// 确保会话已启动（首次按授权策略启动；token 存在时静默恢复）。
+pub(crate) fn ensure_started(
+    request: &CaptureRequest,
+    session: &mut PipeWireSession,
+) -> Result<(), String> {
+    if session.started {
+        return Ok(());
+    }
+    // 交互模式：启动会话（会弹一次授权选择器）。
+    // 无头模式（铁律严禁弹窗）：仅当存在持久化恢复 token 时才尝试静默恢复；
+    // 无 token 直接报错，绝不触发选择器。
+    if !request.allow_interactive_portal && crate::auth::restore_token().is_none() {
+        return Err(
+            "portal screencast requires interactive authorization; run once with the GUI to grant it"
+                .to_string(),
+        );
+    }
+    session.start_session(request)
+}
+
+/// 等待下一帧（滚动截图逐帧拉取 / 单帧捕获共用）。
+///
+/// - `min_frame_time_ms`：陈旧帧过滤——只返回到达时间 ≥ 该值的帧。
+/// - 返回 `Some((image, frame_time_ms))`；超时无新帧返回 `None`；流错误返回 Err。
+pub(crate) fn next_frame(
+    session: &PipeWireSession,
+    min_frame_time_ms: u64,
+    timeout_ms: u64,
+) -> Result<Option<(image::RgbaImage, u64)>, String> {
+    let state = session.state.as_ref().ok_or("pipewire state missing")?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    loop {
+        if let Some(err) = state.error.lock().unwrap().clone() {
+            return Err(err);
+        }
+        let (image, time) = {
+            let img = state.latest.lock().unwrap().clone();
+            let t = *state.latest_time_ms.lock().unwrap();
+            (img, t)
+        };
+        if let Some(image) = image {
+            if time >= min_frame_time_ms {
+                return Ok(Some((image, time)));
+            }
         }
         if std::time::Instant::now() >= deadline {
-            return Err("pipewire screencast did not produce a frame within 5s".to_string());
+            return Ok(None);
         }
         thread::sleep(std::time::Duration::from_millis(30));
     }
@@ -598,6 +628,12 @@ fn handle_process(stream: &pw::stream::StreamRef, shared: &mut Arc<SharedState>)
     let image = read_frame(data, chunk_offset, chunk_stride, chunk_size, &info);
     if let Some(image) = image {
         *shared.latest.lock().unwrap() = Some(image);
+        // 单调时钟（毫秒）作为帧时间戳，供陈旧帧过滤 / 帧率节流 / 录制时间线。
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        *shared.latest_time_ms.lock().unwrap() = now_ms;
     }
     // buffer 在作用域结束（drop）时自动归还流。
 }

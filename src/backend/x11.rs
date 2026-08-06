@@ -91,19 +91,34 @@ pub(crate) fn capture(request: &CaptureRequest) -> CaptureResult {
         Err(e) => return CaptureResult::failure(crate::capture_types::Backend::X11, e),
     };
 
-    // 计算捕获区域（逻辑坐标）。source_geometry 为空或 all_outputs 时抓整个
-    // 虚拟桌面（X11 root 本身覆盖整个虚拟桌面）。
+    // 计算捕获区域（逻辑坐标）。优先级：
+    //   1. 显式 source_geometry（非 all_outputs）
+    //   2. preferred_output 命中某输出（--display）
+    //   3. all_outputs 或未指定 → 整个虚拟桌面
     let geometry = match request.source_geometry {
         Some((x, y, w, h)) if !request.all_outputs => (x, y, w, h),
         _ => {
-            let setup = conn.setup();
-            match setup.roots.first() {
-                Some(r) => (0, 0, r.width_in_pixels as i32, r.height_in_pixels as i32),
-                None => {
-                    return CaptureResult::failure(
-                        crate::capture_types::Backend::X11,
-                        "no X11 screen",
-                    )
+            // --display：按输出名裁剪到该输出几何。
+            let mut matched = None;
+            if !request.all_outputs {
+                if let Some(name) = request.preferred_output.as_deref() {
+                    matched = crate::output::find_output(name)
+                        .map(|o| o.geometry)
+                        .filter(|(x, y, w, h)| *w > 0 && *h > 0 && *x >= 0 && *y >= 0);
+                }
+            }
+            if let Some(g) = matched {
+                g
+            } else {
+                let setup = conn.setup();
+                match setup.roots.first() {
+                    Some(r) => (0, 0, r.width_in_pixels as i32, r.height_in_pixels as i32),
+                    None => {
+                        return CaptureResult::failure(
+                            crate::capture_types::Backend::X11,
+                            "no X11 screen",
+                        )
+                    }
                 }
             }
         }
@@ -184,6 +199,12 @@ pub(crate) fn capture(request: &CaptureRequest) -> CaptureResult {
         }
     };
 
+    // include_cursor：XFixes 读光标并合成到截图（X11 自研，不依赖系统截图）。
+    let mut image = image;
+    if request.include_cursor {
+        paint_cursor_into(&conn, &mut image, (clamp_x, clamp_y));
+    }
+
     let result_geom = if (gx, gy, gw, gh) == (clamp_x, clamp_y, clamp_w, clamp_h) {
         request.source_geometry
     } else {
@@ -197,6 +218,62 @@ pub(crate) fn capture(request: &CaptureRequest) -> CaptureResult {
         output_name: None,
         backend: crate::capture_types::Backend::X11,
         frame_time_ms: 0,
+    }
+}
+
+/// 用 XFixes 光标图像合成到截图（位置为光标热点在根窗口的坐标，
+/// 再换算到截图区域内的偏移）。
+fn paint_cursor_into(
+    conn: &x11rb::rust_connection::RustConnection,
+    image: &mut image::RgbaImage,
+    region_origin: (i32, i32),
+) {
+    use x11rb::protocol::xfixes::ConnectionExt as XFixesExt;
+
+    let reply = match conn.xfixes_get_cursor_image() {
+        Ok(cookie) => match cookie.reply() {
+            Ok(r) => r,
+            Err(_) => return,
+        },
+        Err(_) => return,
+    };
+    let (cw, ch) = (reply.width as i32, reply.height as i32);
+    if cw <= 0 || ch <= 0 || reply.cursor_image.len() as i32 != cw * ch {
+        return;
+    }
+    // 光标左上角在根窗口的坐标 = (x - xhot, y - yhot)。
+    let cursor_left = reply.x as i32 - reply.xhot as i32;
+    let cursor_top = reply.y as i32 - reply.yhot as i32;
+    let (ox, oy) = region_origin;
+
+    let img_w = image.width() as i32;
+    let img_h = image.height() as i32;
+    let pixels = image.as_mut();
+
+    for py in 0..ch {
+        let img_y = cursor_top + py - oy;
+        if img_y < 0 || img_y >= img_h {
+            continue;
+        }
+        for px in 0..cw {
+            let img_x = cursor_left + px - ox;
+            if img_x < 0 || img_x >= img_w {
+                continue;
+            }
+            let argb = reply.cursor_image[(py * cw + px) as usize];
+            let a = ((argb >> 24) & 0xff) as u8;
+            if a == 0 {
+                continue;
+            }
+            let r = ((argb >> 16) & 0xff) as u8;
+            let g = ((argb >> 8) & 0xff) as u8;
+            let b = (argb & 0xff) as u8;
+            let dst = (img_y as usize * img_w as usize + img_x as usize) * 4;
+            pixels[dst] = r;
+            pixels[dst + 1] = g;
+            pixels[dst + 2] = b;
+            pixels[dst + 3] = a;
+        }
     }
 }
 

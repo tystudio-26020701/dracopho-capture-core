@@ -4,16 +4,18 @@
 //! 无需门户、零弹窗。GNOME/KDE 不支持该协议时 `available()` 后由
 //! PipeWire screencast 兜底。
 
+use std::collections::HashMap;
 use std::os::fd::BorrowedFd;
 use std::sync::{mpsc, Arc, Mutex};
 
+use wayland_client::backend::ObjectId;
 use wayland_client::protocol::wl_buffer::WlBuffer;
-use wayland_client::protocol::wl_output::WlOutput;
+use wayland_client::protocol::wl_output::{self, WlOutput};
 use wayland_client::protocol::wl_registry::Event as RegistryEvent;
 use wayland_client::protocol::wl_registry::WlRegistry;
 use wayland_client::protocol::wl_shm::{self, WlShm};
 use wayland_client::protocol::wl_shm_pool::WlShmPool;
-use wayland_client::{delegate_noop, Connection, Dispatch, QueueHandle, WEnum};
+use wayland_client::{delegate_noop, Connection, Dispatch, Proxy, QueueHandle, WEnum};
 use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_frame_v1::{
     self, ZwlrScreencopyFrameV1,
 };
@@ -45,6 +47,8 @@ struct State {
     manager: Option<ZwlrScreencopyManagerV1>,
     shm: Option<WlShm>,
     outputs: Vec<WlOutput>,
+    /// wl_output v4 name 事件缓存（用于按 --display 选择输出）。
+    output_names: HashMap<ObjectId, String>,
 }
 
 impl Dispatch<WlRegistry, ()> for State {
@@ -63,7 +67,9 @@ impl Dispatch<WlRegistry, ()> for State {
             } else if interface == "wl_shm" {
                 state.shm = Some(registry.bind::<WlShm, (), State>(name, 1, qh, ()));
             } else if interface == "wl_output" {
-                state.outputs.push(registry.bind::<WlOutput, (), State>(name, 1, qh, ()));
+                state
+                    .outputs
+                    .push(registry.bind::<WlOutput, (), State>(name, 4, qh, ()));
             }
         }
     }
@@ -72,8 +78,22 @@ impl Dispatch<WlRegistry, ()> for State {
 delegate_noop!(State: ignore WlShm);
 delegate_noop!(State: ignore WlShmPool);
 delegate_noop!(State: ignore WlBuffer);
-delegate_noop!(State: ignore WlOutput);
 delegate_noop!(State: ignore ZwlrScreencopyManagerV1);
+
+impl Dispatch<WlOutput, ()> for State {
+    fn event(
+        state: &mut Self,
+        output: &WlOutput,
+        event: wl_output::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let wl_output::Event::Name { name } = event {
+            state.output_names.insert(output.id(), name);
+        }
+    }
+}
 
 impl Dispatch<ZwlrScreencopyFrameV1, FrameData> for State {
     fn event(
@@ -264,6 +284,7 @@ pub(crate) fn capture(request: &CaptureRequest) -> CaptureResult {
         manager: None,
         shm: None,
         outputs: Vec::new(),
+        output_names: HashMap::new(),
     };
     let mut queue = conn.new_event_queue::<State>();
     let qh = queue.handle();
@@ -289,7 +310,17 @@ pub(crate) fn capture(request: &CaptureRequest) -> CaptureResult {
             "wl_shm not available",
         );
     };
-    let Some(output) = state.outputs.first() else {
+    // 选择输出：优先按请求的输出名匹配（--display），否则第一个输出。
+    let output = if let Some(name) = request.preferred_output.as_deref() {
+        state
+            .outputs
+            .iter()
+            .find(|o| state.output_names.get(&o.id()).is_some_and(|n| n == name))
+    } else {
+        None
+    }
+    .or_else(|| state.outputs.first());
+    let Some(output) = output else {
         return CaptureResult::failure(
             crate::capture_types::Backend::WlrScreencopy,
             "no wl_output available",

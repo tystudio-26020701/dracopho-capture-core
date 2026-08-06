@@ -162,14 +162,14 @@ fn is_gnome_wayland() -> bool {
 ///
 /// 平台：X11（原生 X11 / XWayland 自研枚举）→ GNOME Wayland（自研扩展）。
 /// 返回空 Vec 表示平台不支持枚举。
-pub fn list_windows() -> Vec<WindowInfo> {
+pub fn list_windows(include_hidden: bool) -> Vec<WindowInfo> {
     if is_gnome_wayland() {
         let gnome = gnome_windows();
         if !gnome.is_empty() {
             return gnome;
         }
     }
-    x11_windows()
+    x11_windows(include_hidden)
 }
 
 // ---------------------------------------------------------------------------
@@ -209,7 +209,7 @@ fn prop_u32s(reply: &GetPropertyReply) -> Vec<u32> {
 }
 
 /// X11 自研窗口枚举。
-fn x11_windows() -> Vec<WindowInfo> {
+fn x11_windows(include_hidden: bool) -> Vec<WindowInfo> {
     let conn = match x11::connection() {
         Ok(c) => c,
         Err(_) => return Vec::new(),
@@ -313,8 +313,8 @@ fn x11_windows() -> Vec<WindowInfo> {
 
     if !list.is_empty() {
         for (index, window) in list.into_iter().enumerate() {
-            // 跳过隐藏/最小化窗口（无头截图默认不截隐藏窗口）。
-            if read_hidden(window) {
+            // 隐藏/最小化窗口：默认跳过；include_hidden 时保留（供 PID/进程定位）。
+            if !include_hidden && read_hidden(window) {
                 continue;
             }
             let Some(geometry) = window_geometry(window) else {

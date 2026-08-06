@@ -15,6 +15,8 @@ pub mod egl_dmabuf;
 
 pub mod window;
 
+pub mod output;
+
 pub mod backend {
     pub mod pipewire_screencast;
     pub mod wlr_screencopy;

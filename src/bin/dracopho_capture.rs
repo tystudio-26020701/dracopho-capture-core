@@ -21,6 +21,7 @@ fn print_usage() {
          用法:\n  \
          dracopho-capture --list-backends\n  \
          dracopho-capture --list-windows\n  \
+         dracopho-capture --list-outputs\n  \
          dracopho-capture --authorize\n  \
          dracopho-capture --capture-to <file|dir> [--region x,y,w,h] [--include-cursor]\n  \
          dracopho-capture --capture-to <dir> --window <sel> [--window <sel>...] [--window-by <mode>] [--component x,y,w,h]\n\
@@ -51,6 +52,7 @@ fn main() -> ExitCode {
     let mut authorize = false;
     let mut list_backends = false;
     let mut list_windows = false;
+    let mut list_outputs = false;
     let mut window_selectors: Vec<String> = Vec::new();
     let mut window_by: Option<String> = None;
 
@@ -60,6 +62,7 @@ fn main() -> ExitCode {
         match arg.as_str() {
             "--list-backends" => list_backends = true,
             "--list-windows" => list_windows = true,
+            "--list-outputs" => list_outputs = true,
             "--authorize" => authorize = true,
             "--include-cursor" => include_cursor = true,
             "--capture-to" => {
@@ -135,8 +138,20 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    if list_outputs {
+        let outputs = dracopho_capture_core::output::list_outputs();
+        println!("outputs: {}", outputs.len());
+        for o in outputs.iter() {
+            println!(
+                "  name={} geo={},{},{}x{}",
+                o.name, o.geometry.0, o.geometry.1, o.geometry.2, o.geometry.3
+            );
+        }
+        return ExitCode::SUCCESS;
+    }
+
     if list_windows {
-        let windows = dracopho_capture_core::window::list_windows();
+        let windows = dracopho_capture_core::window::list_windows(false);
         println!("count: {}", windows.len());
         for (index, w) in windows.iter().enumerate() {
             let pid = if w.pid > 0 {

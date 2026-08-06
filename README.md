@@ -29,6 +29,14 @@ Maintained by **Beijing Taiyin Zaowu Technology Co., Ltd. (北京太殷造物科
   authorization dialogs.
 - **Headless rule**: never creates windows, never pops dialogs, never disturbs
   other user processes.
+- **Streaming capture**: pull frames repeatedly (scroll capture) with frame
+  timestamps, stale-frame filtering, and FPS throttling (recording).
+- **Output selection**: enumerate physical outputs (XRandR) and capture by
+  output name; multi-monitor aware.
+- **X11 cursor compositing**: capture includes the pointer (XFixes), no
+  reliance on system screenshot.
+- **Hidden-window enumeration**: list minimized/hidden windows for PID/process
+  targeting.
 
 ## Feature Comparison
 
@@ -175,12 +183,35 @@ Full example: `examples/integration_demo.rs`.
    falls back to full-screen frame + window-rect crop (occluded-window content
    may be unreliable; `WindowCapture` reports it honestly via `object_capture`
    / `error` fields).
+4. **Scroll capture / recording**: use the streaming API instead of repeated
+   single captures:
+
+   ```rust
+   use dracopho_capture_core::capture_types::{start_stream, CaptureRequest};
+
+   let stream = start_stream(&CaptureRequest {
+       source_geometry: Some((0, 0, 800, 600)),
+       target_fps: 15,          // optional FPS throttle (recording)
+       ..Default::default()
+   })?;
+   // Pull the latest frame, skipping frames older than `min_frame_time_ms`
+   // (scroll capture hides its own UI, then uses now+delay to skip stale frames).
+   while let Some((frame, t)) = stream.next_frame(min_frame_time_ms, 1000)? {
+       frame.save("frame.png")?;
+   }
+   stream.stop();
+   ```
+
+   `Stream::next_frame` returns `(RgbaImage, frame_time_ms)`; `target_fps`
+   throttles the pull rate and `minimum_frame_time_ms` filters stale frames —
+   both are wired into the PipeWire screencast backend.
 
 ## CLI (Verification Tool)
 
 ```bash
 dracopho-capture --list-backends        # list available self-developed backends
 dracopho-capture --list-windows         # list windows (JSON)
+dracopho-capture --list-outputs         # list outputs (XRandR)
 dracopho-capture --authorize            # interactive authorize once (saves token)
 dracopho-capture --capture-to out.png   # headless capture (silent)
 dracopho-capture --capture-to out.png --region 0,0,1920,1080 --include-cursor

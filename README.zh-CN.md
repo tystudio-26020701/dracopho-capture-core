@@ -24,6 +24,10 @@
 - **授权一次、永久静默**：ScreenCast 授权经恢复 token 持久化与自动轮换，
   跨进程、跨重启复用，无需反复授权弹窗。
 - **无头铁律**：不建窗口、不弹窗、不干扰用户其他进程。
+- **流式捕获**：持续拉帧（滚动截图）带帧时间戳、陈旧帧过滤、帧率限速（录制）。
+- **输出选择**：枚举物理输出（XRandR），按输出名截图，多屏感知。
+- **X11 光标合成**：截图包含鼠标指针（XFixes），不依赖系统截图。
+- **隐藏窗口枚举**：列出最小化/隐藏窗口，供 PID/进程定位。
 
 ## 功能对比列表
 
@@ -157,12 +161,33 @@ C++ `--window-by` 一致的选择器解析。
 3. **窗口内容抓取**：X11 走 XComposite（真实窗口内容）；GNOME/Wayland 回退
    到全屏帧 + 窗口矩形裁剪（被遮挡窗口内容不可靠，`WindowCapture` 以
    `object_capture` / `error` 字段如实标注）。
+4. **滚动截图 / 录制**：用流式接口替代反复单帧截图：
+
+   ```rust
+   use dracopho_capture_core::capture_types::{start_stream, CaptureRequest};
+
+   let stream = start_stream(&CaptureRequest {
+       source_geometry: Some((0, 0, 800, 600)),
+       target_fps: 15,          // 可选帧率限速（录制）
+       ..Default::default()
+   })?;
+   // 拉最新帧；滚动截图隐藏自身 UI 后用 now+delay 设 min_frame_time_ms 跳过陈旧帧。
+   while let Some((frame, t)) = stream.next_frame(min_frame_time_ms, 1000)? {
+       frame.save("frame.png")?;
+   }
+   stream.stop();
+   ```
+
+   `Stream::next_frame` 返回 `(RgbaImage, frame_time_ms)`；`target_fps` 限制
+   拉取帧率、`minimum_frame_time_ms` 过滤陈旧帧——两者均已接入 PipeWire
+   screencast 后端。
 
 ## CLI（验证工具）
 
 ```bash
 dracopho-capture --list-backends        # 列出可用自研后端
 dracopho-capture --list-windows         # 列出窗口（JSON）
+dracopho-capture --list-outputs         # 列出输出（XRandR）
 dracopho-capture --authorize            # 交互授权一次（保存恢复 token）
 dracopho-capture --capture-to out.png   # 无头截图（静默）
 dracopho-capture --capture-to out.png --region 0,0,1920,1080 --include-cursor

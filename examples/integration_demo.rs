@@ -52,7 +52,7 @@ fn main() -> ExitCode {
     }
 
     // 3. 多窗口（按 class / 标题子串匹配）。
-    let windows = dracopho_capture_core::window::list_windows();
+    let windows = dracopho_capture_core::window::list_windows(false);
     println!("03 窗口列表: {}", windows.len());
     for (i, w) in windows.iter().enumerate() {
         println!("   [{i}] title=\"{}\" class={} geo={},{},{}x{}",

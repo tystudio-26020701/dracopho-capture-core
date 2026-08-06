@@ -22,7 +22,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 wayland-client = "0.31"
 wayland-backend = "0.3"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
-x11rb = { version = "0.13", features = ["composite", "dl-libxcb"] }
+x11rb = { version = "0.13", features = ["composite", "randr", "xfixes", "dl-libxcb"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
