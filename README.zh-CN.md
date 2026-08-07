@@ -318,10 +318,15 @@ scripts/kde_regression.sh --force-kde # 跳过会话检查（无头 Xvfb + kwin_
 ```
 
 支持无头验证（无需真实 KDE 桌面）：Xvfb + `kwin_x11`（加
-`KWIN_SCREENSHOT_NO_PERMISSION_CHECKS=1`）+ 伪造
+`KWIN_SCREENSHOT_NO_PERMISSION_CHECKS=1`、`LIBGL_ALWAYS_SOFTWARE=1`、
+`EGL_PLATFORM=surfaceless`）+ 伪造
 `XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=KDE KDE_SESSION_VERSION=6`，
-即可完整走通 KDE 路径（KWin scripting 窗口枚举、X11 id 桥接、ScreenShot2
-区域抓取）；CaptureWindow-by-UUID 需真实 KWin 6 + 原生 Wayland 窗口。
+KWin X11 后端即运行在 Mesa llvmpipe EGL（软件渲染）上，KDE 路径全部
+端到端可验：KWin scripting 窗口枚举、X11 id 桥接、ScreenShot2
+`CaptureWindow` by-UUID `[object]` 与 `CaptureArea`——已在 KWin 6.7 +
+zenity 原生窗口上验证（PASS=12 FAIL=0）。缺 EGL 环境变量时 KWin 回退
+`KWin::VirtualBackend`（无 EGL 合成），ScreenShot2 取帧返回
+"Screenshot got cancelled"；回归脚本检测到该状态会把相关断言降级为 SKIP。
 
 脚本覆盖：会话分类（wayland-kde）、能力探测含 kwin-screenshot2、整屏链不含
 kwin-screenshot2（portal 授权门保留）、输出/窗口枚举（UUID + XWayland 0x 桥接）、

@@ -352,11 +352,17 @@ scripts/kde_regression.sh --force-kde # skip session check (headless Xvfb + kwin
 ```
 
 Headless verification (no real KDE desktop) is supported and verified: run
-Xvfb + `kwin_x11` (with `KWIN_SCREENSHOT_NO_PERMISSION_CHECKS=1`) and forge
+Xvfb + `kwin_x11` (with `KWIN_SCREENSHOT_NO_PERMISSION_CHECKS=1`,
+`LIBGL_ALWAYS_SOFTWARE=1`, `EGL_PLATFORM=surfaceless`) and forge
 `XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=KDE KDE_SESSION_VERSION=6`;
-all KDE paths are then exercised (window enumeration via KWin scripting
-D-Bus, X11 id bridging, ScreenShot2 area capture). CaptureWindow-by-UUID
-needs a real KWin 6 + native Wayland window.
+the KWin X11 backend then runs on the Mesa llvmpipe EGL (software) and every
+KDE path is exercised end-to-end: window enumeration via KWin scripting D-Bus,
+X11 id bridging, ScreenShot2 `CaptureWindow` by-UUID `[object]` and
+`CaptureArea` — verified on KWin 6.7 with a zenity native window
+(PASS=12 FAIL=0). Without the EGL variables KWin falls back to
+`KWin::VirtualBackend` (no EGL compositing) and ScreenShot2 frame reads
+return "Screenshot got cancelled"; the regression script detects that state
+and downgrades those assertions to SKIP.
 
 脚本覆盖：会话分类（wayland-kde）、能力探测含 kwin-screenshot2、整屏链不含
 kwin-screenshot2（portal 授权门保留）、输出/窗口枚举（UUID + XWayland 0x 桥接）、
