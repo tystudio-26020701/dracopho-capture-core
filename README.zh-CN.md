@@ -304,6 +304,23 @@ dracopho-capture --capture-to dir --window VSCodium --window mark-shot \
 
 > CLI 为验证与调试用途，正确的库调用方式见上文 API 与集成指南。
 
+## KDE Plasma 实机回归
+
+KDE 专属路径（KWin ScreenShot2 窗口级/区域、KWin scripting 窗口枚举、
+XWayland X11 id 桥接）依赖正在运行的 KWin 合成器，无法在 GNOME/无头环境验证。
+在任意 KDE Plasma Wayland 机器上运行一键回归脚本：
+
+```bash
+scripts/kde_regression.sh            # 构建 + 全项验证
+scripts/kde_regression.sh --no-build # 用已构建的 target/release/dracopho-capture
+scripts/kde_regression.sh --python   # 追加 Python 绑定冒烟
+```
+
+脚本覆盖：会话分类（wayland-kde）、能力探测含 kwin-screenshot2、整屏链不含
+kwin-screenshot2（portal 授权门保留）、输出/窗口枚举（UUID + XWayland 0x 桥接）、
+窗口对象级抓取 `[object]`、显式 `--backend kwin-screenshot2` 区域抓取。
+退出码：0=全通过 / 1=存在失败项 / 2=非 KDE 环境 / 3=构建失败。
+
 ## Python 绑定
 
 `python/` 目录提供 PyO3 绑定，覆盖库的**每个功能**，单 abi3 wheel 支持
