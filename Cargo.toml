@@ -16,8 +16,11 @@ path = "src/bin/dracopho_capture.rs"
 
 [dependencies]
 pipewire = "0.8"
+# 注意：ashpd 默认启用 zbus/tokio，故 zbus 必须与之一致地使用 tokio executor
+# （若同时声明 async-io 会形成 socket(async-io reactor) 与 executor(tokio) 的
+# 混用，导致 object server 收不到回调）。KDE 窗口枚举在显式 tokio runtime 中运行。
 ashpd = "0.10"
-zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
+zbus = { version = "5", default-features = false, features = ["tokio", "blocking-api"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 wayland-client = "0.31"
 wayland-backend = "0.3"
