@@ -338,6 +338,34 @@ dracopho-capture --capture-to dir --window VSCodium --window mark-shot \
 > The CLI is for verification and debugging; see the API and Integration Guide
 > above for the proper library usage.
 
+## Python Bindings
+
+A PyO3 binding (`python/`) exposes every library feature to Python 3.8+ (single
+abi3 wheel, no runtime deps):
+
+```bash
+pip install dracopho-capture-core   # build: cd python && maturin build --release
+```
+
+```python
+from dracopho_capture_core import CaptureRequest, RouteMode, capture_frame
+
+plan = detect_routing()                    # session kind + recommended backends
+res = capture_frame(CaptureRequest(
+    source_geometry=(0, 0, 800, 600),
+    route=RouteMode.only("x11"),
+))
+if res.ok:
+    open("shot.png", "wb").write(res.png())
+
+# multi-screen set (never merged): capture_outputs(CaptureRequest(all_outputs=True))
+# streaming: start_stream(req).next_frame(min_frame_time_ms, timeout_ms)
+# auth preflight: verify_saved_token()
+```
+
+See `python/README.md` and `python/examples/capture_demo.py`. Tests:
+`python/tests/test_api.py`.
+
 ## Build
 
 ```bash
@@ -370,6 +398,11 @@ src/
   bin/dracopho_capture.rs CLI verification tool
 examples/
   integration_demo.rs     library API integration example
+python/                   PyO3 bindings (maturin; module dracopho_capture_core)
+  src/lib.rs              binding implementations
+  tests/test_api.py       Python API tests
+  examples/capture_demo.py Python usage example
+  README.md               Python package readme
 assets/
   TY-DracoPho.svg         project logo (brand asset, copyright reserved)
 ```

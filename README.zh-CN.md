@@ -304,6 +304,34 @@ dracopho-capture --capture-to dir --window VSCodium --window mark-shot \
 
 > CLI 为验证与调试用途，正确的库调用方式见上文 API 与集成指南。
 
+## Python 绑定
+
+`python/` 目录提供 PyO3 绑定，覆盖库的**每个功能**，单 abi3 wheel 支持
+Python 3.8+，无运行时依赖：
+
+```bash
+pip install dracopho-capture-core   # 构建：cd python && maturin build --release
+```
+
+```python
+from dracopho_capture_core import CaptureRequest, RouteMode, capture_frame
+
+plan = detect_routing()                    # 会话类型 + 推荐后端
+res = capture_frame(CaptureRequest(
+    source_geometry=(0, 0, 800, 600),
+    route=RouteMode.only("x11"),
+))
+if res.ok:
+    open("shot.png", "wb").write(res.png())
+
+# 多屏幕集合（不拼接）：capture_outputs(CaptureRequest(all_outputs=True))
+# 流式：start_stream(req).next_frame(min_frame_time_ms, timeout_ms)
+# 授权预检：verify_saved_token()
+```
+
+详见 `python/README.md` 与 `python/examples/capture_demo.py`；
+测试 `python/tests/test_api.py`。
+
 ## 构建
 
 ```bash
@@ -335,6 +363,11 @@ src/
   bin/dracopho_capture.rs CLI 验证工具
 examples/
   integration_demo.rs     库 API 集成示例
+python/                   PyO3 绑定（maturin；模块 dracopho_capture_core）
+  src/lib.rs              绑定实现
+  tests/test_api.py       Python API 测试
+  examples/capture_demo.py Python 用法示例
+  README.md               Python 包说明
 assets/
   TY-DracoPho.svg         项目 logo（品牌资产，单独保留版权）
 ```

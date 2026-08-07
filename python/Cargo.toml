@@ -1,0 +1,24 @@
+[package]
+name = "dracopho-capture-core-py"
+version = "0.1.0"
+edition = "2021"
+description = "DracoPho capture core Python bindings (PyO3)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tystudio-26020701/dracopho-capture-core"
+
+[lib]
+# 注意：lib 目标名与依赖 crate（dracopho-capture-core 的 lib 名同为
+# dracopho_capture_core）必须不同，否则 `dracopho_capture_core::` 解析二义。
+# maturin 以 pyproject 的 module-name（dracopho_capture_core）决定 .so 命名，
+# pymodule 函数名与之匹配即可。
+name = "dracopho_capture_core_py"
+crate-type = ["cdylib"]
+
+[dependencies]
+dracopho-capture-core = { path = ".." }
+pyo3 = { version = "0.29", features = ["abi3-py38"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[features]
+# 仅供本机调试用（链接本机 Python 头文件），发布走 abi3-py38。
+default = []

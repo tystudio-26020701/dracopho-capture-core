@@ -1,0 +1,28 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "dracopho-capture-core"
+version = "0.1.0"
+description = "DracoPho 自研截屏核心 Python 绑定：PipeWire screencast / wlr-screencopy / X11 后端 + KWin ScreenShot2，按桌面智能路由到最轻专用通道"
+readme = "README.md"
+license = { text = "MIT OR Apache-2.0" }
+requires-python = ">=3.8"
+authors = [{ name = "Beijing Taiyin Zaowu Technology Co., Ltd.", email = "tystudio-26020701@protonmail.com" }]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Multimedia :: Graphics :: Capture",
+]
+keywords = ["screenshot", "screen-capture", "wayland", "x11", "pipewire", "kwin"]
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/tystudio-26020701/dracopho-capture-core"
+
+[tool.maturin]
+# abi3-py38：单个 wheel 覆盖 Python 3.8+，无需为每个 Python 版本单独打包。
+module-name = "dracopho_capture_core"
+features = ["pyo3/abi3-py38"]
