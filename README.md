@@ -345,10 +345,18 @@ XWayland X11 id 桥接）依赖正在运行的 KWin 合成器，无法在 GNOME/
 在任意 KDE Plasma Wayland 机器上运行一键回归脚本：
 
 ```bash
-scripts/kde_regression.sh            # 构建 + 全项验证
-scripts/kde_regression.sh --no-build # 用已构建的 target/release/dracopho-capture
-scripts/kde_regression.sh --python   # 追加 Python 绑定冒烟
+scripts/kde_regression.sh            # build + full verification (KDE Plasma Wayland)
+scripts/kde_regression.sh --no-build # use existing target/release/dracopho-capture
+scripts/kde_regression.sh --python   # also run the Python binding smoke test
+scripts/kde_regression.sh --force-kde # skip session check (headless Xvfb + kwin_x11)
 ```
+
+Headless verification (no real KDE desktop) is supported and verified: run
+Xvfb + `kwin_x11` (with `KWIN_SCREENSHOT_NO_PERMISSION_CHECKS=1`) and forge
+`XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=KDE KDE_SESSION_VERSION=6`;
+all KDE paths are then exercised (window enumeration via KWin scripting
+D-Bus, X11 id bridging, ScreenShot2 area capture). CaptureWindow-by-UUID
+needs a real KWin 6 + native Wayland window.
 
 脚本覆盖：会话分类（wayland-kde）、能力探测含 kwin-screenshot2、整屏链不含
 kwin-screenshot2（portal 授权门保留）、输出/窗口枚举（UUID + XWayland 0x 桥接）、

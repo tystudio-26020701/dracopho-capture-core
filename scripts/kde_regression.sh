@@ -6,11 +6,13 @@
 #   4. 优雅降级（ScreenShot2 缺失时窗口抓取回退 X11 / 整屏回退 portal）
 #
 # 用法：
-#   scripts/kde_regression.sh [--no-build] [--python] [--window-by <mode> <sel>]
+#   scripts/kde_regression.sh [--no-build] [--python] [--force-kde]
 #
 # 环境要求：KDE Plasma Wayland 会话；构建环境沿用仓库现有依赖
 #   （libpipewire + clang，见 README 构建节；可用环境变量覆盖）。
 # 可选 --python：额外跑 Python 绑定冒烟。
+# 可选 --force-kde：跳过"必须是 KDE Wayland 会话"检查——用于无头 Xvfb+KWin
+#   （kwin_x11）验证环境（配合伪造 XDG_SESSION_TYPE=wayland 等变量）。
 #
 # 退出码：0=全通过；1=存在失败项；2=环境不满足（非 KDE 等）；3=构建失败。
 
@@ -22,6 +24,7 @@ cd "$REPO_DIR"
 BIN="$REPO_DIR/target/release/dracopho-capture"
 DO_BUILD=1
 DO_PYTHON=0
+FORCE_KDE=0
 WINDOW_BY="${KDE_REG_WINDOW_BY:-auto}"
 WINDOW_SEL="${KDE_REG_WINDOW_SEL:-}"
 
@@ -32,6 +35,7 @@ for arg in "$@"; do
     case "$arg" in
         --no-build) DO_BUILD=0 ;;
         --python) DO_PYTHON=1 ;;
+        --force-kde) FORCE_KDE=1 ;;
         *) echo "未知参数: $arg" >&2; exit 2 ;;
     esac
 done
@@ -82,20 +86,25 @@ fi
 [ -x "$BIN" ] || { echo "找不到二进制: $BIN（先构建或加 --no-build 用已构建版本）" >&2; exit 3; }
 
 # ---------------------------------------------------------------------------
-# 1) 会话检查：必须是 KDE Plasma Wayland
+# 1) 会话检查：必须是 KDE Plasma Wayland（--force-kde 跳过，用于无头验证）
 # ---------------------------------------------------------------------------
 section "会话检查"
 SESSION_TYPE="${XDG_SESSION_TYPE:-}"
 DESKTOP="$(echo "${XDG_CURRENT_DESKTOP:-}" | tr '[:upper:]' '[:lower:]')"
 KDE_VER="${KDE_SESSION_VERSION:-}"
 IS_KDE=0
-[ "$SESSION_TYPE" = "wayland" ] || { skip "非 Wayland 会话（$SESSION_TYPE），KDE 专属路径无法验证"; }
-if [ "$SESSION_TYPE" = "wayland" ]; then
-    if [ -n "$KDE_VER" ] || echo "$DESKTOP" | grep -qE "kde|plasma"; then
-        IS_KDE=1
-        ok "KDE Plasma Wayland 会话（desktop=$DESKTOP version=$KDE_VER）"
-    else
-        skip "Wayland 但非 KDE（desktop=$DESKTOP）——脚本仅验证 KDE 专属路径，跳过"
+if [ "$FORCE_KDE" = "1" ]; then
+    IS_KDE=1
+    ok "已强制按 KDE 会话验证（--force-kde，用于无头 Xvfb+KWin 环境）"
+else
+    [ "$SESSION_TYPE" = "wayland" ] || { skip "非 Wayland 会话（$SESSION_TYPE），KDE 专属路径无法验证"; }
+    if [ "$SESSION_TYPE" = "wayland" ]; then
+        if [ -n "$KDE_VER" ] || echo "$DESKTOP" | grep -qE "kde|plasma"; then
+            IS_KDE=1
+            ok "KDE Plasma Wayland 会话（desktop=$DESKTOP version=$KDE_VER）"
+        else
+            skip "Wayland 但非 KDE（desktop=$DESKTOP）——脚本仅验证 KDE 专属路径，跳过"
+        fi
     fi
 fi
 if [ "$IS_KDE" != "1" ]; then
