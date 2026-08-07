@@ -133,7 +133,16 @@ fn script_source(unique_name: &str, result_path: &str) -> String {
             }}
             if (!rect || typeof rect.width !== "number" || rect.width <= 1 || rect.height <= 1) continue;
             var uuid = prop(w, "internalId");
-            uuid = (typeof uuid === "string") ? uuid : "";
+            // KWin 6 的 internalId 是 QUuid 对象（非 string），需显式 toString；
+            // KWin 5.x 可能为空串。统一转字符串。
+            try {{
+                if (uuid && typeof uuid === "object" && typeof uuid.toString === "function") {{
+                    uuid = uuid.toString();
+                }} else if (typeof uuid !== "string") {{
+                    uuid = String(uuid || "");
+                }}
+            }} catch (e) {{ uuid = ""; }}
+            if (typeof uuid !== "string") uuid = "";
             var key = uuid || (rect.x + "," + rect.y + "," + rect.width + "," + rect.height);
             if (seen[key]) continue;
             seen[key] = true;

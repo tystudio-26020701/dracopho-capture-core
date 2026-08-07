@@ -432,7 +432,24 @@ pub fn capture_window_object_content(
     for backend in crate::routing::window_object_backends() {
         let image = match backend {
             Backend::X11 => x11::capture_window_content(window, include_cursor).ok(),
-            Backend::KwinScreenShot2 => kwin_screenshot2::capture_window_content(window, include_cursor).ok(),
+            Backend::KwinScreenShot2 => {
+                match kwin_screenshot2::capture_window_content(window, include_cursor) {
+                    Ok(img) => Some(img),
+                    Err(e) => {
+                        // 仅调试输出：CaptureWindow 失败属正常回退路径。
+                        if std::env::var("DRACOPHO_CAPTURE_DEBUG")
+                            .map(|v| !v.is_empty() && v != "0")
+                            .unwrap_or(false)
+                        {
+                            eprintln!(
+                                "dracopho-capture: kwin CaptureWindow failed for id={}: {e}",
+                                window.id
+                            );
+                        }
+                        None
+                    }
+                }
+            }
             _ => None,
         };
         if image.is_some() {
