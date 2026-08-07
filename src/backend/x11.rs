@@ -104,7 +104,7 @@ pub(crate) fn capture(request: &CaptureRequest) -> CaptureResult {
                 if let Some(name) = request.preferred_output.as_deref() {
                     matched = crate::output::find_output(name)
                         .map(|o| o.geometry)
-                        .filter(|(x, y, w, h)| *w > 0 && *h > 0 && *x >= 0 && *y >= 0);
+                        .filter(|(_, _, w, h)| *w > 0 && *h > 0);
                 }
             }
             if let Some(g) = matched {

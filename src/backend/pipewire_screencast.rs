@@ -22,6 +22,16 @@ use crate::capture_types::{
     CaptureRequest, CaptureResult, Backend, DRM_FORMAT_MOD_INVALID, DRM_FORMAT_MOD_LINEAR,
 };
 
+/// 调试日志（DRACOPHO_CAPTURE_DEBUG=1 时输出到 stderr）。
+fn debug_log(msg: &str) {
+    if env::var("DRACOPHO_CAPTURE_DEBUG")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false)
+    {
+        eprintln!("dracopho-capture: {msg}");
+    }
+}
+
 use pw::spa::pod::{ChoiceValue, Object, Property, Value};
 use pw::spa::utils::{Choice, ChoiceEnum, ChoiceFlags, Id as SpaId};
 
@@ -85,6 +95,16 @@ impl PipeWireSession {
     }
 }
 
+/// 获取 X11 root window 的 portal 窗口标识符（`x11:XID` 格式）。
+///
+/// 供交互授权时作为 ScreenCast `Start` 的父窗口：GNOME 后端据此把授权
+/// 对话框关联到当前显示器。X11 不可用（纯 Wayland 无 DISPLAY）时返回 None。
+fn x11_root_window_identifier() -> Option<ashpd::WindowIdentifier> {
+    use x11rb::connection::Connection as X11ConnectionTrait;
+    let conn = crate::backend::x11::connection().ok()?;
+    let root = conn.setup().roots.first()?.root;
+    Some(ashpd::WindowIdentifier::from_xid(root as u64))
+}
 pub(crate) fn capture_with_session(
     request: &CaptureRequest,
     session: &mut PipeWireSession,
@@ -130,11 +150,37 @@ pub(crate) fn ensure_started(
     // 交互模式：启动会话（会弹一次授权选择器）。
     // 无头模式（铁律严禁弹窗）：仅当存在持久化恢复 token 时才尝试静默恢复；
     // 无 token 直接报错，绝不触发选择器。
-    if !request.allow_interactive_portal && crate::auth::restore_token().is_none() {
-        return Err(
-            "portal screencast requires interactive authorization; run once with the GUI to grant it"
-                .to_string(),
-        );
+    if !request.allow_interactive_portal {
+        let token = crate::auth::restore_token();
+        if token.is_none() {
+            return Err(
+                "portal screencast requires interactive authorization; run once with the GUI to grant it"
+                    .to_string(),
+            );
+        }
+        // 无头模式还必须静默校验 token 仍可恢复：portal 前端在 token 失效时
+        // 会忽略它并正常弹选择器（这正是"无头后台截图干扰用户"的根源）。
+        // 直接查询权限存储做预检（auth::verify_restore_token，库内部自动执行；
+        // 集成方也可主动调用），绝不调用会弹窗的 Start。
+        // 预检结论处理：
+        //   - Ok(true)  确认有效 → 正常静默恢复；
+        //   - Ok(false) 确认失效 → 立即失败（绝不调用会弹选择器的 Start）；
+        //   - Err        预检本身失败（DBus 抖动/解析失败，无法确认）→ 视为
+        //     不确定，退化为带 10s 防线的一次 Start 尝试（宁可短暂失败，也不
+        //     因预检误判把本来能静默恢复的部署硬性卡死）。
+        match crate::auth::verify_restore_token(token.as_deref().unwrap()) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(
+                    "screencast restore token is no longer valid; re-run --authorize".to_string(),
+                );
+            }
+            Err(e) => {
+                debug_log(&format!(
+                    "restore-token preflight could not be verified ({e}); proceeding with a guarded Start attempt"
+                ));
+            }
+        }
     }
     session.start_session(request)
 }
@@ -185,22 +231,44 @@ impl PipeWireSession {
         // 授权 token：已授权（--authorize）后无头模式可静默恢复会话。
         let restore_token = crate::auth::restore_token();
 
-        // 交互授权留给用户操作的时间较长；无头 token 恢复必须快速失败，
-        // 避免 token 失效时 portal 选择器无限等待（铁律：无头严禁干扰用户）。
-        let portal_timeout = if request.allow_interactive_portal {
-            std::time::Duration::from_secs(120)
+        // 交互授权：对话框弹出后由用户决定，**不做硬编码超时**。portal 的
+        // Request 语义就是"弹出对话框、等待用户响应"（OBS / GNOME 截图工具
+        // 同款），用户点选后自然返回，想取消直接 Ctrl+C。
+        // 唯一要防的是"对话框根本弹不出来"——无 GUI 环境（无 DISPLAY 且无
+        // WAYLAND_DISPLAY）时对话框不可能显示，等待毫无意义，立即失败返回，
+        // 让调用方（库 / CLI）快速拿到失败信息。
+        // 无头恢复：token 失效已被 verify_restore_token 提前拦截（毫秒级），
+        // 这里的 10s 仅作"首帧迟迟未到"的最后防线，不是授权等待。
+        let portal_timeout: Option<std::time::Duration> = if request.allow_interactive_portal {
+            let has_gui = std::env::var("DISPLAY")
+                .map(|d| !d.is_empty())
+                .unwrap_or(false)
+                || std::env::var("WAYLAND_DISPLAY")
+                    .map(|d| !d.is_empty())
+                    .unwrap_or(false);
+            if !has_gui {
+                return Err(
+                    "interactive authorization requires a GUI session (DISPLAY and WAYLAND_DISPLAY are \
+                     both missing): the portal dialog cannot be shown — run --authorize from the desktop \
+                     session, or use headless mode with an already-saved restore token"
+                        .to_string(),
+                );
+            }
+            None
         } else {
-            std::time::Duration::from_secs(10)
+            Some(std::time::Duration::from_secs(10))
         };
 
-        // portal 协商（tokio 运行时内，超时保护）。
+        // portal 协商（tokio 运行时内）。交互路径无超时（等用户操作），
+        // 无头路径带 10s 防线。
         let portal_result = rt.block_on(async {
-            tokio::time::timeout(portal_timeout, async {
+            let operation = async {
                 let proxy = Screencast::new().await.map_err(|e| e.to_string())?;
                 let session = proxy
                     .create_session()
                     .await
                     .map_err(|e| format!("ScreenCast CreateSession failed: {e}"))?;
+                debug_log("portal CreateSession done");
 
                 // 光标策略：请求包含鼠标时优先 Embedded，否则 Hidden。
                 let available = proxy
@@ -216,72 +284,105 @@ impl PipeWireSession {
                 };
 
                 // 持久化授权（persist_mode=EXPLICITLY_REVOKED）：无论交互授权还是
-                // 无头恢复都必须保持持久化，否则 Start 不会返回新 restore_token，
-                // token 轮换链断掉，下次恢复又失效弹窗。
+                // 无头恢复都必须保持持久化，否则授权不会跨会话保留，下次恢复
+                // 又失效弹窗。
                 //
-                // restore_token 是单次的：用完作废，必须用 Start 返回的新 token
-                // 继续下一轮（永久生效，跨进程、跨重启，直到 portal 权限被撤销）。
+                // portal 规范称 restore_token 单次轮换（Start 返回新 token）；
+                // GNOME 50 实证同一 token 可持续有效。无论哪种行为，统一保存
+                // Start 返回的 token 即可（永久生效，跨进程、跨重启，直到
+                // portal 权限被撤销）。
                 let persist_mode = PersistMode::ExplicitlyRevoked;
                 let restore = restore_token.as_deref();
 
+                // multiple=true：交互选源一次即可选中多个显示器，Start 返回多个流，
+                // 每个流带 position/size 标识对应显示器（与 GNOME/Ubuntu 选屏一致）；
+                // 之后按 preferred_output 在流中匹配目标显示器，未指定时取第一个。
                 proxy
                     .select_sources(
                         &session,
                         cursor_mode,
                         SourceType::Monitor.into(),
-                        false,
+                        true,
                         restore,
                         persist_mode,
                     )
                     .await
                     .map_err(|e| format!("ScreenCast SelectSources failed: {e}"))?;
+                debug_log("portal SelectSources call returned");
 
                 // Start 会弹授权选择器（首次）；无头路径仅在 token 有效时静默通过。
-                let streams = proxy
-                    .start(&session, None)
+                // 交互授权时传 X11 root window 作为父窗口标识符：GNOME 后端需要
+                // 父窗口才能把授权对话框关联到当前屏幕并正确显示（缺失时出现
+                // "Failed to associate portal window with parent window"，对话框
+                // 可能不渲染）。纯 Wayland 无 DISPLAY 时退化为 None。
+                let parent = if request.allow_interactive_portal {
+                    x11_root_window_identifier()
+                } else {
+                    None
+                };
+                debug_log("portal SelectSources done; calling Start（等待 Response）");
+                // ashpd 的 start().await 内部已等到 portal Response 信号；
+                // 交互授权时这一步就是"等用户点选"，无头恢复时应毫秒级返回。
+                let start_request = proxy
+                    .start(&session, parent.as_ref())
                     .await
-                    .map_err(|e| e.to_string())?
+                    .map_err(|e| format!("ScreenCast Start call failed: {e}"))?;
+                debug_log("portal Start Response received");
+                let streams = start_request
                     .response()
                     .map_err(|e| format!("ScreenCast Start failed: {e}"))?;
-                let first = streams
-                    .streams()
-                    .first()
+                debug_log(&format!(
+                    "portal Start Response received; {} stream(s)",
+                    streams.streams().len()
+                ));
+                let selected = pick_stream(streams.streams(), request.preferred_output.as_deref())
                     .ok_or_else(|| "ScreenCast Start returned no stream".to_string())?;
 
+                debug_log("calling OpenPipeWireRemote");
                 let fd = proxy
                     .open_pipe_wire_remote(&session)
                     .await
                     .map_err(|e| format!("ScreenCast OpenPipeWireRemote failed: {e}"))?;
+                debug_log("portal OpenPipeWireRemote returned");
 
                 let token = streams.restore_token().map(|s| s.to_string());
 
                 Ok::<_, String>((
                     fd,
-                    first.pipe_wire_node_id(),
-                    first.position(),
-                    first.size(),
+                    selected.pipe_wire_node_id(),
+                    selected.position(),
+                    selected.size(),
                     request.include_cursor && cursor_mode == CursorMode::Embedded,
                     token,
                 ))
-            })
-            .await
+            };
+            match portal_timeout {
+                Some(duration) => tokio::time::timeout(duration, operation).await,
+                None => match operation.await {
+                    Ok(v) => Ok(Ok(v)),
+                    Err(e) => Ok(Err(e)),
+                },
+            }
         });
 
         let (fd, node_id, position, size, cursor_included, new_token) = match portal_result {
             Ok(Ok(v)) => v,
             Ok(Err(e)) => return Err(e),
+            // 仅无头路径可能走到超时（交互路径无超时；无 GUI 已在进入前立即失败）。
+            // 注意：超时 ≠ token 失效。token 失效已被 verify_restore_token 在 Start
+            // 之前拦截；能走到这里说明 portal 协商某一步在 10s 内未返回，如实报错。
             Err(_) => {
-                return Err(if request.allow_interactive_portal {
-                    "screencast authorization timed out".to_string()
-                } else {
-                    "screencast restore token is no longer valid; re-run --authorize".to_string()
-                })
+                return Err(
+                    "portal screencast negotiation timed out (10s) in headless mode; the restore token passed pre-validation — check portal/PipeWire service health, or re-run --authorize"
+                        .to_string(),
+                )
             }
         };
 
-        // 轮换并保存 restore_token：restore_token 是单次的，Start 返回的新 token
-        // 必须保存，否则下次恢复会因旧 token 作废而再次弹窗授权。此操作对交互
-        // 授权与无头恢复一视同仁，使授权永久生效（跨进程、跨重启）。
+        // 保存 Start 返回的 restore_token：portal 规范称 token 单次轮换，GNOME 50
+        // 实证可能返回同一 token；无论哪种，都以 Start 返回者为准持久化，保证
+        // 下次静默恢复有效。此操作对交互授权与无头恢复一视同仁，使授权永久
+        // 生效（跨进程、跨重启）。
         if let Some(t) = new_token.as_ref() {
             crate::auth::save_restore_token(t);
         }
@@ -333,6 +434,52 @@ const SUPPORTED_FORMATS: &[spa::param::video::VideoFormat] = &[
     spa::param::video::VideoFormat::RGB,
     spa::param::video::VideoFormat::BGR,
 ];
+
+/// 从 portal Start 返回的多流中选择目标显示器流。
+///
+/// multiple=true 时，Start 对每个被选中的显示器各返回一个流，每个流带
+/// `position`/`size`（合成器逻辑坐标）标识对应显示器。按 `preferred_output`
+/// 名称解析出的几何匹配对应流；**未指定或未命中时回退第一个流**。
+fn pick_stream<'a>(
+    streams: &'a [ashpd::desktop::screencast::Stream],
+    preferred_output: Option<&str>,
+) -> Option<&'a ashpd::desktop::screencast::Stream> {
+    if streams.is_empty() {
+        return None;
+    }
+    let summary: Vec<(u32, Option<(i32, i32)>, Option<(i32, i32)>)> = streams
+        .iter()
+        .map(|s| (s.pipe_wire_node_id(), s.position(), s.size()))
+        .collect();
+    // 未指定 preferred_output → 直接取第一个流（绝不能返回 None，
+    // 否则"未指定显示器"的正常请求会被误判为"无流"）。
+    let Some(name) = preferred_output else {
+        return Some(&streams[0]);
+    };
+    let geometry = crate::output::find_output(name).map(|o| o.geometry);
+    // 精确匹配 position/size 与目标显示器几何；失败则回退第一个。
+    let idx = match_stream_index(&summary, geometry);
+    debug_log(&format!(
+        "pick_stream: preferred_output={name} geometry={geometry:?} -> stream[{idx}] (node={}, pos={:?}, size={:?})",
+        summary[idx].0, summary[idx].1, summary[idx].2
+    ));
+    Some(&streams[idx])
+}
+
+/// 纯函数：在多流中选择与目标几何 (gx, gy, gw, gh) 精确匹配的流索引；
+/// 未命中返回 0（第一个）。测试与 pick_stream 共用同一匹配语义。
+fn match_stream_index(
+    streams: &[(u32, Option<(i32, i32)>, Option<(i32, i32)>)],
+    target: Option<(i32, i32, i32, i32)>,
+) -> usize {
+    let Some((gx, gy, gw, gh)) = target else {
+        return 0;
+    };
+    streams
+        .iter()
+        .position(|(_, pos, size)| *pos == Some((gx, gy)) && *size == Some((gw, gh)))
+        .unwrap_or(0)
+}
 
 /// 构造单个 raw 格式协商参数（可选 modifier 变体）。
 fn build_raw_format_object(
@@ -815,4 +962,42 @@ fn read_frame(
         }
     }
     Some(image)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::match_stream_index;
+
+    #[test]
+    fn picks_stream_matching_target_geometry() {
+        // 两个显示器流：HDMI-2 在 (0,0,1920x1080)，HDMI-1 在 (1920,0,1680x1050)。
+        let streams = [
+            (0u32, Some((0, 0)), Some((1920, 1080))),
+            (1u32, Some((1920, 0)), Some((1680, 1050))),
+        ];
+        // 目标 = 副屏 HDMI-1 的几何。
+        assert_eq!(
+            match_stream_index(&streams, Some((1920, 0, 1680, 1050))),
+            1
+        );
+        // 目标 = 主屏 HDMI-2 的几何。
+        assert_eq!(
+            match_stream_index(&streams, Some((0, 0, 1920, 1080))),
+            0
+        );
+    }
+
+    #[test]
+    fn unmatched_geometry_falls_back_to_first() {
+        let streams = [
+            (0u32, Some((0, 0)), Some((1920, 1080))),
+            (1u32, Some((1920, 0)), Some((1680, 1050))),
+        ];
+        // 不存在的几何 → 回退第一个。
+        assert_eq!(match_stream_index(&streams, Some((9999, 9999, 100, 100))), 0);
+        // 未指定目标 → 第一个。
+        assert_eq!(match_stream_index(&streams, None), 0);
+        // 空流列表 → 0（调用方已保证非空）。
+        assert_eq!(match_stream_index(&[], Some((0, 0, 10, 10))), 0);
+    }
 }

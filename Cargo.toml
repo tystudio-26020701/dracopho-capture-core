@@ -2,7 +2,7 @@
 name = "dracopho-capture-core"
 version = "0.1.0"
 edition = "2021"
-description = "DracoPho 自研截屏核心（Rust）：PipeWire screencast / wlr-screencopy / X11 自研后端，严禁调用任何系统自带截图服务"
+description = "DracoPho 自研截屏核心（Rust）：PipeWire screencast / wlr-screencopy / X11 自研后端 + KWin ScreenShot2（KDE 窗口级），按桌面类型智能路由到最轻专用通道"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/tystudio-26020701/dracopho-capture-core"
 
@@ -29,3 +29,4 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 anyhow = "1"
+regex = "1"

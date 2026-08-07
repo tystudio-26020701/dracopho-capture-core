@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use image::RgbaImage;
 
-use crate::backend::{pipewire_screencast, wlr_screencopy, x11};
+use crate::backend::{kwin_screenshot2, pipewire_screencast, wlr_screencopy, x11};
 use crate::window::WindowMatch;
 
 /// DMA-BUF modifier "无效" 常量（与 drm_fourcc.h 的 DRM_FORMAT_MOD_INVALID 一致）。
@@ -24,6 +24,9 @@ pub enum Backend {
     WlrScreencopy,
     /// 自研 X11 直接抓取（XComposite / XGetImage）。
     X11,
+    /// KWin ScreenShot2 DBus 接口（KDE Plasma 专用，铁律放宽后启用）。
+    /// 窗口级/区域/全屏静默抓取（遮挡/最小化窗口真实内容，对标 Spectacle）。
+    KwinScreenShot2,
     /// Windows Graphics Capture（平台公开 API，供 Windows 封装层使用）。
     WindowsWgc,
 }
@@ -35,9 +38,28 @@ impl Backend {
             Backend::PipeWireScreencast => "pipewire-screencast",
             Backend::WlrScreencopy => "wlr-screencopy",
             Backend::X11 => "x11",
+            Backend::KwinScreenShot2 => "kwin-screenshot2",
             Backend::WindowsWgc => "windows-wgc",
         }
     }
+}
+
+/// 路由模式：后端选择的控制方式。
+///
+/// 默认 `Auto` = 按桌面类型智能分发（`routing::detect_routing` 的推荐顺序）。
+/// 调用方可用 `Only` / `Order` / `Prefer` 参数化指定路由方案，实现"灵活路由
+/// 切换指定模式"。路由决策可先调用 `routing::detect_routing()` 拿到
+/// `RoutingPlan`（含可直接回填的 `RouteMode` 参数）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteMode {
+    /// 自动：按桌面/会话类型智能分发到"最轻专用通道"。
+    Auto,
+    /// 仅使用指定后端，失败不自动回退。
+    Only(Backend),
+    /// 按给定优先级依次尝试（显式回退链）。
+    Order(Vec<Backend>),
+    /// 优先指定后端，失败后按自动推荐顺序回退。
+    Prefer(Backend),
 }
 
 /// 后端无关的捕获请求。
@@ -69,6 +91,11 @@ pub struct CaptureRequest {
     pub window_matches: Vec<WindowMatch>,
     /// 窗口内组件子区域（相对窗口左上角的 x,y,w,h）。配合 window_matches 使用。
     pub component: Option<(i32, i32, i32, i32)>,
+    /// 路由模式：如何选择后端（默认 `Auto`，按桌面类型智能分发）。
+    ///
+    /// 可传 `Only` / `Order` / `Prefer` 参数化指定路由方案；推荐先调用
+    /// `routing::detect_routing()` 获取 `RoutingPlan`，再回填其 `route` 字段。
+    pub route: RouteMode,
 }
 
 impl Default for CaptureRequest {
@@ -84,6 +111,7 @@ impl Default for CaptureRequest {
             hide_own_windows: true,
             window_matches: Vec::new(),
             component: None,
+            route: RouteMode::Auto,
         }
     }
 }
@@ -123,11 +151,13 @@ pub struct WindowObjectInfo {
     pub rect: (i32, i32, i32, i32),
 }
 
-/// 当前会话适用的自研后端列表（按优先级排序，不含任何系统截图服务）。
+/// 当前会话适用（能力探测）的自研后端列表（按优先级排序）。
 ///
 /// 优先级：wlr-screencopy（免授权、零弹窗）→ PipeWire screencast（其余
-/// Wayland）→ X11（原生 X11 会话；XWayland 下 root 抓取不可用，仅作最后兜底，
-/// 窗口对象抓取不受影响）。
+/// Wayland）→ KWin ScreenShot2（KDE 窗口级/区域）→ X11（原生 X11 会话；
+/// XWayland 下 root 抓取不可用，仅作最后兜底，窗口对象抓取不受影响）。
+/// 此函数只做"能力探测"；实际路由顺序由 `CaptureRequest.route` /
+/// `routing::resolve_route` 决定（桌面感知）。
 pub fn available_backends() -> Vec<Backend> {
     let mut backends = Vec::new();
     if wlr_screencopy::available() {
@@ -135,6 +165,9 @@ pub fn available_backends() -> Vec<Backend> {
     }
     if pipewire_screencast::available() {
         backends.push(Backend::PipeWireScreencast);
+    }
+    if kwin_screenshot2::available() {
+        backends.push(Backend::KwinScreenShot2);
     }
     if x11::available() {
         // XWayland（Wayland 会话且 DISPLAY 存在）下 X11 root 抓取不可用，
@@ -159,19 +192,46 @@ fn shared_pipewire_session() -> Arc<Mutex<pipewire_screencast::PipeWireSession>>
 
 /// 捕获一帧并返回后端无关结果。
 ///
-/// 后端选择优先级：
-///   1. wlr-screencopy（wlroots 系合成器，无需门户，零弹窗）
-///   2. PipeWire screencast（其余 Wayland：GNOME / KDE 等）
-///   3. X11 自研抓取（X11 会话或 XWayland 回退）
+/// 路由语义（`request.route`，默认 `Auto`）：
+/// - `Auto`：按桌面/会话类型智能分发（`routing::detect_routing`），每桌面
+///   只用"最轻专用通道"：wlroots→wlr-screencopy、GNOME/KDE→portal
+///   ScreenCast、原生 X11→XGetImage（KDE 窗口级走 KWin ScreenShot2，见
+///   `capture_window_object_content`）。
+/// - `Only` / `Order` / `Prefer`：调用方参数化指定路由方案，失败按显式或
+///   自动推荐顺序回退。
 ///
-/// 失败时依次回退到下一个后端；全部失败返回错误。
+/// 多屏幕语义（严禁混淆）：
+/// - 多屏幕选择（`all_outputs=true` 的**屏幕集**）→ 请用 [`capture_outputs`]，
+///   返回每个屏幕一张图，**不拼接**；
+/// - 跨屏幕截图（`all_outputs=true` 整虚拟桌面，仅 X11 原生支持；或显式
+///   `source_geometry` 区域）→ 单张组合/裁剪图（允许）。
+///   Wayland 后端不支持组合整虚拟桌面，`all_outputs=true` 时会返回明确错误
+///   并引导使用 `capture_outputs`。
+///
+/// 全部后端失败时返回错误。
 pub fn capture_frame(request: &CaptureRequest) -> CaptureResult {
     let mut errors: Vec<String> = Vec::new();
 
-    for backend in available_backends() {
+    for backend in crate::routing::resolve_route(&request.route) {
         let result = match backend {
-            Backend::WlrScreencopy => wlr_screencopy::capture(request),
+            Backend::WlrScreencopy => {
+                if request.all_outputs {
+                    errors.push(
+                        "wlr-screencopy: combined all-outputs capture is not supported on Wayland; use capture_outputs() for the per-screen set"
+                            .to_string(),
+                    );
+                    continue;
+                }
+                wlr_screencopy::capture(request)
+            }
             Backend::PipeWireScreencast => {
+                if request.all_outputs {
+                    errors.push(
+                        "pipewire-screencast: combined all-outputs capture is not supported on Wayland; use capture_outputs() for the per-screen set"
+                            .to_string(),
+                    );
+                    continue;
+                }
                 let shared = shared_pipewire_session();
                 let mut session = shared.lock().unwrap();
                 match pipewire_screencast::capture_with_session(request, &mut session) {
@@ -191,6 +251,7 @@ pub fn capture_frame(request: &CaptureRequest) -> CaptureResult {
                 }
             }
             Backend::X11 => x11::capture(request),
+            Backend::KwinScreenShot2 => kwin_screenshot2::capture(request),
             Backend::WindowsWgc => {
                 return CaptureResult::failure(
                     Backend::WindowsWgc,
@@ -219,6 +280,59 @@ pub fn capture_frame(request: &CaptureRequest) -> CaptureResult {
     )
 }
 
+/// 捕获多个显示器，返回**每个屏幕一张图**的集合（屏幕集，不拼接）。
+///
+/// 语义（多屏幕 vs 跨屏幕，严禁混淆）：
+/// - **多屏幕**（`all_outputs=true`，或未指定输出）：对每个显示器各返回一张
+///   截图（`CaptureResult.output_name` 标识对应屏幕），**绝不拼接**；
+/// - **跨屏幕截图**（显式 `source_geometry` 区域跨越多个显示器；或 X11 原生
+///   的整虚拟桌面组合）：返回单张组合/裁剪图（允许，`capture_frame` 处理）。
+///
+/// 每个屏幕按 `preferred_output` 路由到该屏幕的流。PipeWire 后端每屏幕建立
+/// 一次会话（恢复 token 静默复用，含一次 portal 协商 + 首帧等待），因此多屏
+/// 请求**串行**捕获各屏，N 屏约 N ×（portal 协商 + 首帧等待）耗时；X11/wlr
+/// 后端按输出几何各自抓取。
+pub fn capture_outputs(request: &CaptureRequest) -> Vec<CaptureResult> {
+    // 显式区域 = 单帧（跨屏时由后端整桌面裁剪组合）。
+    if request.source_geometry.is_some() {
+        return vec![capture_frame(request)];
+    }
+
+    // 目标屏幕名列表。
+    let names: Vec<String> = if let Some(name) = request.preferred_output.as_deref() {
+        vec![name.to_string()]
+    } else {
+        crate::output::list_outputs()
+            .into_iter()
+            .map(|o| o.name)
+            .filter(|n| !n.is_empty())
+            .collect()
+    };
+
+    let mut out = Vec::new();
+    if names.is_empty() {
+        // 无法枚举输出：退化为单帧（按默认路由）。
+        let mut req = request.clone();
+        req.all_outputs = false;
+        out.push(capture_frame(&req));
+        return out;
+    }
+
+    for name in names {
+        let mut req = request.clone();
+        req.all_outputs = false;
+        req.preferred_output = Some(name);
+        let result = capture_frame(&req);
+        // PipeWire 会话按 preferred_output 绑定单流：多屏之间重置共享会话，
+        // 让每个屏幕用新会话匹配自身的流（恢复 token 静默）。
+        if result.backend == Backend::PipeWireScreencast {
+            stop_active_stream();
+        }
+        out.push(result);
+    }
+    out
+}
+
 /// 停止当前复用的流式后端会话（滚动截图暂停/失败时调用）。
 pub fn stop_active_stream() {
     if let Ok(mut guard) = ACTIVE_PIPEWIRE.lock() {
@@ -241,7 +355,15 @@ pub struct Stream {
 /// - 返回的 `Stream` 可反复 `next_frame`。
 /// - 授权语义与 `capture_frame` 一致：首次集成方传 `allow_interactive_portal=true`
 ///   触发一次授权，此后同进程静默。
+/// - 流式仅由 PipeWire screencast 提供；若 `request.route` 显式排除该后端则报错。
 pub fn start_stream(request: &CaptureRequest) -> Result<Stream, String> {
+    let backends = crate::routing::resolve_route(&request.route);
+    if !backends.iter().any(|b| *b == Backend::PipeWireScreencast) {
+        return Err(
+            "streaming capture requires the pipewire-screencast backend, but the route excludes it"
+                .to_string(),
+        );
+    }
     let session = shared_pipewire_session();
     {
         let mut guard = session.lock().unwrap();
@@ -298,11 +420,26 @@ impl Stream {
 }
 
 /// 抓取单个窗口自身内容。不支持或失败返回 None，调用方回退区域抓取。
+///
+/// 按路由分发（`routing::window_object_backends`）：
+/// - KDE Plasma：KWin ScreenShot2 CaptureWindow（原生 Wayland 窗口真实内容），
+///   再回退 X11 XComposite（XWayland 窗口）；
+/// - 其余桌面：X11 XComposite（原生 X11 / XWayland）。
 pub fn capture_window_object_content(
     window: &WindowObjectInfo,
     include_cursor: bool,
 ) -> Option<RgbaImage> {
-    x11::capture_window_content(window, include_cursor).ok()
+    for backend in crate::routing::window_object_backends() {
+        let image = match backend {
+            Backend::X11 => x11::capture_window_content(window, include_cursor).ok(),
+            Backend::KwinScreenShot2 => kwin_screenshot2::capture_window_content(window, include_cursor).ok(),
+            _ => None,
+        };
+        if image.is_some() {
+            return image;
+        }
+    }
+    None
 }
 
 /// 单个窗口的捕获结果。

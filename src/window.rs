@@ -1,11 +1,12 @@
 //! 窗口枚举与选择。
 //!
-//! 自研实现，不调用任何"系统自带截图"服务：
+//! 自研实现：
 //! - X11：直接用 X11 协议枚举 `_NET_CLIENT_LIST_STACKING` 并读取各窗口的
 //!   title / WM_CLASS / _NET_WM_PID / frame extents。
 //! - GNOME Wayland：经随软件自带的 MarkShotScrollHelper 扩展的
 //!   `WindowGeometries`（D-Bus）获取窗口列表。
-//! - wlroots 系：wlr-foreign-toplevel 协议（后续迭代）。
+//! - KDE Plasma：经 KWin scripting D-Bus（`org.kde.kwin.Scripting`）加载
+//!   一次性 JS 脚本枚举窗口（含 KWin internalId UUID，供 ScreenShot2 抓取）。
 //!
 //! 无头铁律：枚举是纯查询，不建窗口、不弹窗、不干扰任何用户进程。
 
@@ -149,27 +150,54 @@ fn process_name_for_pid(pid: i64) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-/// 是否 GNOME Wayland 会话。
-fn is_gnome_wayland() -> bool {
-    let session = std::env::var("XDG_SESSION_TYPE").unwrap_or_default().to_lowercase();
-    let desktop = std::env::var("XDG_CURRENT_DESKTOP")
-        .unwrap_or_default()
-        .to_lowercase();
-    session == "wayland" && desktop.contains("gnome")
-}
-
 /// 枚举当前会话的所有可见窗口。
 ///
-/// 平台：X11（原生 X11 / XWayland 自研枚举）→ GNOME Wayland（自研扩展）。
+/// 平台：GNOME Wayland（自研扩展）→ KDE Plasma（KWin scripting D-Bus）→
+/// X11（原生 X11 / XWayland 自研枚举）。
 /// 返回空 Vec 表示平台不支持枚举。
 pub fn list_windows(include_hidden: bool) -> Vec<WindowInfo> {
-    if is_gnome_wayland() {
+    if crate::routing::is_gnome_wayland() {
         let gnome = gnome_windows();
         if !gnome.is_empty() {
             return gnome;
         }
     }
+    if crate::routing::is_kde_wayland() {
+        let kde = crate::backend::kwin_windows::list_kde_windows(include_hidden);
+        if !kde.is_empty() {
+            // 交叉匹配 XWayland 窗口：KWin scripting 只给 UUID，把与 X11 枚举
+            // 匹配的窗口 id 换成 X11 十六进制 XID——ScreenShot2 不可用时对象级
+            // 抓取可回退 X11 XComposite（与原生 X11/GNOME 行为一致）。
+            if !std::env::var("DISPLAY").unwrap_or_default().is_empty() {
+                let x11 = x11_windows(include_hidden);
+                return bridge_x11_ids(kde, &x11);
+            }
+            return kde;
+        }
+        // KDE 枚举失败（脚本被拒/超时/服务缺失）：落到下方 X11 兜底
+        // （XWayland 窗口），与 GNOME 分支的空列表回退行为一致。
+    }
     x11_windows(include_hidden)
+}
+
+/// 把 KDE 枚举结果中与 X11 枚举匹配的窗口 id 替换为 X11 十六进制 XID。
+///
+/// 匹配条件：几何矩形完全相等，且（class 相等或 title 相等）且（pid 已知时一致）。
+fn bridge_x11_ids(kde: Vec<WindowInfo>, x11: &[WindowInfo]) -> Vec<WindowInfo> {
+    kde.into_iter()
+        .map(|mut w| {
+            if let Some(xw) = x11.iter().find(|xw| {
+                xw.geometry == w.geometry
+                    && (w.class == xw.class || (!w.title.is_empty() && w.title == xw.title))
+                    && (w.pid <= 0 || xw.pid <= 0 || w.pid == xw.pid)
+            }) {
+                if !xw.id.is_empty() {
+                    w.id = xw.id.clone();
+                }
+            }
+            w
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
