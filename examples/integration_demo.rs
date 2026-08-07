@@ -7,23 +7,39 @@
 //! 用法（先在 GNOME 桌面运行一次 --authorize，然后本示例无需再授权弹窗）：
 //!   dracopho-capture-demo <out-dir>
 //!
-//! 依次演示：全屏 → 区域 → 多窗口 → 组件子区域。
+//! 依次演示：路由感知 → 全屏 → 区域 → 多窗口 → 组件子区域 → 指定路由 → 多屏幕集合。
 
 use std::process::ExitCode;
 
 use dracopho_capture_core::capture_types::{
-    capture_frame, capture_windows, CaptureRequest,
+    capture_frame, capture_outputs, capture_windows, Backend, CaptureRequest, RouteMode,
 };
+use dracopho_capture_core::routing::detect_routing;
 use dracopho_capture_core::window::{parse_match, WindowMatch};
 
 fn main() -> ExitCode {
     let dir = std::env::args().nth(1).unwrap_or_else(|| "/tmp/dracopho-demo".to_string());
     std::fs::create_dir_all(&dir).expect("create output dir");
 
-    // 1. 全屏。
+    // 0. 智能路由感知：打印推荐方案，并把感知到的路由参数固定到请求。
+    let plan = detect_routing();
+    println!("00 会话类型: {}，推荐后端:", plan.session.name());
+    for b in &plan.recommended {
+        println!("    - {}", b.name());
+    }
+    for n in &plan.notes {
+        println!("    说明: {n}");
+    }
+    println!(
+        "    路由参数（可赋给 CaptureRequest.route）: {:?}",
+        plan.route
+    );
+
+    // 1. 全屏（使用感知到的路由参数；也可省略用默认 Auto）。
     let req = CaptureRequest {
         source_geometry: None,
         allow_interactive_portal: true, // 仅首次（无 token 时）会弹一次授权
+        route: plan.route.clone(),
         ..Default::default()
     };
     let result = capture_frame(&req);
@@ -94,6 +110,49 @@ fn main() -> ExitCode {
                 println!("   组件[{i}] \"{}\" -> {path} ({}x{})", capture.window.title, img.width(), img.height());
             }
             None => eprintln!("   组件[{i}] 失败: {}", capture.error.as_deref().unwrap_or("未知")),
+        }
+    }
+
+    // 5. 参数化指定路由：仅用指定后端 / 优先指定后端。
+    //    （Only 失败不回退；Prefer 失败后按自动推荐顺序回退。）
+    let req = CaptureRequest {
+        source_geometry: Some((0, 0, 640, 480)),
+        route: RouteMode::Only(Backend::PipeWireScreencast),
+        ..Default::default()
+    };
+    let result = capture_frame(&req);
+    match result.image {
+        Some(img) => {
+            let path = format!("{dir}/05-only-pipewire.png");
+            img.save(&path).expect("save");
+            println!("05 仅 PipeWire: {path} ({}x{})", img.width(), img.height());
+        }
+        None => eprintln!("05 仅 PipeWire 失败: {}", result.error.unwrap_or_default()),
+    }
+
+    // 6. 多屏幕集合（不拼接，每屏一张；用 output_name 区分）。
+    //    跨屏幕区域用 capture_frame 的单帧组合/裁剪，二者严禁混用。
+    let captures = capture_outputs(&CaptureRequest {
+        all_outputs: true,
+        ..Default::default()
+    });
+    for (i, c) in captures.iter().enumerate() {
+        match &c.image {
+            Some(img) => {
+                let path = format!("{dir}/06-screen-{i}.png");
+                img.save(&path).expect("save");
+                println!(
+                    "06 屏幕[{i}] name={} -> {path} ({}x{})",
+                    c.output_name.as_deref().unwrap_or("?"),
+                    img.width(),
+                    img.height()
+                );
+            }
+            None => eprintln!(
+                "06 屏幕[{i}] name={} 失败: {}",
+                c.output_name.as_deref().unwrap_or("?"),
+                c.error.as_deref().unwrap_or("未知")
+            ),
         }
     }
 

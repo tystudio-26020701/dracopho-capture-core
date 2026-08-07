@@ -2,10 +2,11 @@
 //!
 //! 用法：
 //!   dracopho-capture --list-backends          列出可用自研后端
+//!   dracopho-capture --list-routing           打印当前会话的智能路由方案
 //!   dracopho-capture --list-windows           列出窗口（JSON）
 //!   dracopho-capture --authorize              交互授权一次（ScreenCast 持久化）
-//!   dracopho-capture --capture-to <file> [--region x,y,w,h] [--include-cursor]
-//!                                            无头屏幕/区域截图到文件
+//!   dracopho-capture --capture-to <file> [--region x,y,w,h] [--include-cursor] [--output <name>] [--backend <name>]
+//!                                            无头屏幕/区域截图到文件（--output 指定显示器；--backend 指定路由）
 //!   dracopho-capture --capture-to <dir> --window <sel> [--window ...] [--window-by auto|id|title|class|index|pid|process] [--component x,y,w,h]
 //!                                            无头按窗口/进程截图（多选，输出到目录）
 //!
@@ -13,29 +14,48 @@
 
 use std::process::ExitCode;
 
-use dracopho_capture_core::capture_types::{available_backends, CaptureRequest};
+use dracopho_capture_core::capture_types::{
+    available_backends, Backend, CaptureRequest, RouteMode,
+};
 
 fn print_usage() {
     eprintln!(
         "dracopho-capture (DracoPho 自研截屏核心)\n\
          用法:\n  \
          dracopho-capture --list-backends\n  \
+         dracopho-capture --list-routing\n  \
          dracopho-capture --list-windows\n  \
          dracopho-capture --list-outputs\n  \
          dracopho-capture --authorize\n  \
-         dracopho-capture --capture-to <file|dir> [--region x,y,w,h] [--include-cursor]\n  \
+         dracopho-capture --capture-to <file|dir> [--region x,y,w,h] [--include-cursor] [--output <name>] [--backend <name>]\n  \
          dracopho-capture --capture-to <dir> --window <sel> [--window <sel>...] [--window-by <mode>] [--component x,y,w,h]\n\
          选项:\n  \
          --list-backends          列出可用自研后端\n  \
+         --list-routing           打印当前会话的智能路由方案（SessionKind + 推荐顺序）\n  \
          --list-windows           列出窗口（JSON）\n  \
          --authorize              交互授权一次（ScreenCast 持久化，保存恢复 token）\n  \
          --capture-to <path>      截图输出（文件；窗口模式为目录）\n  \
          --region x,y,w,h         捕获区域（逻辑坐标）\n  \
+         --output <name>          首选输出名（如 HDMI-1）；GNOME 多流选屏时按
+                                   position/size 匹配该显示器\n  \
+         --backend <name>         指定后端路由（only）：pipewire-screencast|wlr-screencopy|x11|kwin-screenshot2\n  \
          --window <sel>           窗口选择器（可重复）；<sel> 匹配 id/标题/class/序号/pid/进程名\n  \
          --window-by <mode>       auto|id|title|class|index|pid|process\n  \
          --component x,y,w,h      窗口内组件子区域\n  \
          --include-cursor         捕获鼠标指针（尽力而为）"
     );
+}
+
+/// 解析后端名（大小写不敏感，支持别名）。
+fn parse_backend(name: &str) -> Option<Backend> {
+    match name.to_lowercase().replace('_', "-").as_str() {
+        "pipewire" | "pipewire-screencast" | "screencast" => Some(Backend::PipeWireScreencast),
+        "wlr" | "wlr-screencopy" | "screencopy" => Some(Backend::WlrScreencopy),
+        "x11" => Some(Backend::X11),
+        "kwin" | "kwin-screenshot2" | "kwin-screenshot" => Some(Backend::KwinScreenShot2),
+        "windows-wgc" | "wgc" => Some(Backend::WindowsWgc),
+        _ => None,
+    }
 }
 
 fn main() -> ExitCode {
@@ -53,8 +73,11 @@ fn main() -> ExitCode {
     let mut list_backends = false;
     let mut list_windows = false;
     let mut list_outputs = false;
+    let mut list_routing = false;
     let mut window_selectors: Vec<String> = Vec::new();
     let mut window_by: Option<String> = None;
+    let mut output: Option<String> = None;
+    let mut backend: Option<Backend> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -63,8 +86,23 @@ fn main() -> ExitCode {
             "--list-backends" => list_backends = true,
             "--list-windows" => list_windows = true,
             "--list-outputs" => list_outputs = true,
+            "--list-routing" => list_routing = true,
             "--authorize" => authorize = true,
             "--include-cursor" => include_cursor = true,
+            "--backend" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("--backend 缺少后端名参数");
+                    return ExitCode::from(2);
+                }
+                match parse_backend(&args[i]) {
+                    Some(b) => backend = Some(b),
+                    None => {
+                        eprintln!("未知后端: {}", args[i]);
+                        return ExitCode::from(2);
+                    }
+                }
+            }
             "--capture-to" => {
                 i += 1;
                 if i >= args.len() {
@@ -88,6 +126,14 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
                 window_by = Some(args[i].clone());
+            }
+            "--output" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("--output 缺少输出名参数");
+                    return ExitCode::from(2);
+                }
+                output = Some(args[i].clone());
             }
             "--region" => {
                 i += 1;
@@ -138,6 +184,24 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    if list_routing {
+        let plan = dracopho_capture_core::routing::detect_routing();
+        println!("session: {}", plan.session.name());
+        println!("notes:");
+        for n in &plan.notes {
+            println!("  - {n}");
+        }
+        println!("recommended backends (priority order):");
+        for b in &plan.recommended {
+            println!("  - {}", b.name());
+        }
+        println!(
+            "route param (assign to CaptureRequest.route): {:?}",
+            plan.route
+        );
+        return ExitCode::SUCCESS;
+    }
+
     if list_outputs {
         let outputs = dracopho_capture_core::output::list_outputs();
         println!("outputs: {}", outputs.len());
@@ -179,6 +243,11 @@ fn main() -> ExitCode {
         include_cursor,
         allow_interactive_portal: authorize,
         component,
+        preferred_output: output,
+        route: match backend {
+            Some(b) => RouteMode::Only(b),
+            None => RouteMode::Auto,
+        },
         ..Default::default()
     };
 
@@ -206,16 +275,26 @@ fn main() -> ExitCode {
     }
 
     if authorize {
+        // --authorize 的语义是"完成一次 ScreenCast 授权并持久化 token"。
+        // 成功判定 = 本次调用拿到了帧且持久化 token 存在：
+        //   - 首次授权：弹出选择器，用户同意后 token 从无到有；
+        //   - 已有有效 token：静默恢复直接出帧。
+        // 注意不能以"token 内容变化"判成功：portal 规范称 restore_token
+        // 单次轮换，但 GNOME 50 实证 Start 可返回同一 token 持续有效；
+        // 以内容变化判定会让"重新授权"在 token 不轮换时误报失败。
+        // 用户拒绝/超时 → capture_frame 失败（image 为 None），如实报错。
         let result = dracopho_capture_core::capture_types::capture_frame(&request);
-        match result.image {
-            Some(_) => {
-                eprintln!("已授权。此后无头截图将静默复用该授权。");
-                ExitCode::SUCCESS
-            }
-            None => {
-                eprintln!("授权失败: {}", result.error.as_deref().unwrap_or("未知错误"));
-                ExitCode::from(1)
-            }
+        let authorized_now = result.image.is_some()
+            && dracopho_capture_core::auth::restore_token().is_some();
+        if authorized_now {
+            eprintln!("已授权。此后无头截图将静默复用该授权。");
+            ExitCode::SUCCESS
+        } else {
+            eprintln!(
+                "授权失败: {}",
+                result.error.as_deref().unwrap_or("no authorization was granted")
+            );
+            ExitCode::from(1)
         }
     } else if let Some(path) = capture_to {
         let result = dracopho_capture_core::capture_types::capture_frame(&request);
