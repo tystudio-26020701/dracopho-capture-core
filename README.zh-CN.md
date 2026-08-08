@@ -304,6 +304,12 @@ dracopho-capture --capture-to dir --window VSCodium --window mark-shot \
 
 > CLI 为验证与调试用途，正确的库调用方式见上文 API 与集成指南。
 
+## 使用教程
+
+面向使用方的操作向文档见
+[`docs/tutorial/`](docs/tutorial/README.md)：Rust 集成快速上手、Python 快速
+上手、授权与无头部署、多屏/窗口/录制使用。
+
 ## 工程技术报告
 
 完整工程技术文档见
@@ -420,6 +426,7 @@ src/
 examples/
   integration_demo.rs     库 API 集成示例
 docs/
+  tutorial/               使用教程（Rust/Python 快速上手、授权与无头部署、多屏/窗口/录制）
   engineering-report/     工程技术报告（架构/Python/验证矩阵/KWin6+GPU/最佳实践）
 python/                   PyO3 绑定（maturin；模块 dracopho_capture_core）
   src/lib.rs              绑定实现

@@ -23,8 +23,9 @@ KWin 6 + NVIDIA GPU 深度验证、构建与发布最佳实践。
 - **Python 绑定**：PyO3 + abi3-py38 单 wheel 覆盖 Python 3.8+，零运行时依赖，
   图像以 PNG/原始 RGBA 字节返回；GPU 服务器 KDE 会话全面验证 **74/74 通过**。
 - **KWin 6 + NVIDIA T4**：库全链路通过（窗口枚举/CaptureWindow by-UUID/
-  CaptureArea/多窗口/组件/Python 绑定）；KWin GPU 合成受宿主
-  `nvidia_drm modeset=N` 与 cgroup 设备过滤限制，如实记录而非掩盖。
+  CaptureArea/多窗口/组件/Python 绑定）；屏幕级合成经完整 Xorg + NVIDIA
+  用户态 xorg 模块（NV-GLX server 扩展）在真实 GPU 下验证通过
+  （`modeset=Y` 非必需，见 04 报告 §7）。
 - **诚实能力报告**：遮挡/最小化/降级如实上报（`object_capture`/`error`），
   无头模式失效 token 静默预检快速失败，绝不弹合成器选择器。
 

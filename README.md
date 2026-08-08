@@ -338,6 +338,12 @@ dracopho-capture --capture-to dir --window VSCodium --window mark-shot \
 > The CLI is for verification and debugging; see the API and Integration Guide
 > above for the proper library usage.
 
+## Tutorials
+
+See [`docs/tutorial/`](docs/tutorial/README.md) for user-facing guides:
+Rust quick start, Python quick start, authorization & headless deployment,
+and multi-screen / window / recording usage.
+
 ## Engineering Report
 
 See [`docs/engineering-report/`](docs/engineering-report/README.md) for the
@@ -399,10 +405,17 @@ kwin-screenshot2（portal 授权门保留）、输出/窗口枚举（UUID + XWay
 ## Python Bindings
 
 A PyO3 binding (`python/`) exposes every library feature to Python 3.8+ (single
-abi3 wheel, no runtime deps):
+abi3 wheel, no runtime deps).
+
+> **Note**: the package is not yet published to PyPI. Build the wheel locally
+> and install it; the `pip install dracopho-capture-core` command becomes
+> available once it is published.
 
 ```bash
-pip install dracopho-capture-core   # build: cd python && maturin build --release
+cd python
+pip install maturin patchelf
+maturin build --release                       # → target/wheels/dracopho_capture_core-*.whl
+pip install target/wheels/dracopho_capture_core-*.whl
 ```
 
 ```python
@@ -457,6 +470,7 @@ src/
 examples/
   integration_demo.rs     library API integration example
 docs/
+  tutorial/               user guides (Rust/Python quick start, auth & deployment, multi-screen/window/recording)
   engineering-report/     engineering report (architecture / python / verification matrix / KWin6+GPU / best practices)
 python/                   PyO3 bindings (maturin; module dracopho_capture_core)
   src/lib.rs              binding implementations

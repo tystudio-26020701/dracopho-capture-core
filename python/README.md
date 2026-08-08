@@ -17,8 +17,13 @@ ScreenShot2（KDE 窗口级），**按桌面类型智能路由到最轻专用通
 
 ## 安装
 
+> **注意**：该包尚未发布到 PyPI。当前需本地构建 wheel 后安装；待发布后
+> 可直接 `pip install dracopho-capture-core`。
+
 ```bash
-pip install dracopho-capture-core
+pip install maturin patchelf
+maturin build --release                       # → target/wheels/dracopho_capture_core-*.whl
+pip install target/wheels/dracopho_capture_core-*.whl
 ```
 
 ## 快速上手

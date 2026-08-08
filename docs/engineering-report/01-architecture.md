@@ -17,6 +17,43 @@
 **不做的事**：不引入 GStreamer（直接用 libpipewire）、不用 Qt 抓屏、不依赖
 grim/外部进程、不碰 root/DRM 直读。
 
+### 1.1 路由架构总览
+
+```mermaid
+flowchart TB
+    subgraph Caller["调用方"]
+        R["CaptureRequest\n（可选 route 参数）"]
+    end
+
+    R --> D["routing::detect_routing()\nSessionKind 智能感知"]
+
+    D -->|"XDG_SESSION_TYPE + CURRENT_DESKTOP + 环境变量"| S{"会话类型"}
+
+    S -->|wlroots| W1["WaylandWlroots"]
+    S -->|KDE| W2["WaylandKde"]
+    S -->|GNOME| W3["WaylandGnome"]
+    S -->|x11| X1["NativeX11"]
+    S -->|未识别| O1["WaylandOther"]
+
+    W1 -->|"推荐"| WB["wlr-screencopy\n（免 portal 直读像素）"]
+    W2 -->|"推荐"| PW["portal ScreenCast\n（唯一合法整屏通道）"]
+    W3 -->|"推荐"| PW
+    O1 -->|"保留能力探测"| WB
+
+    W2 -.->|"仅窗口级/显式指定"| KS["KWin ScreenShot2\n（KDE 窗口真实内容）"]
+
+    PW --> FALLBACK["失败回退"]
+    WB --> FALLBACK
+    X1 --> XB["X11 XComposite/XGetImage"]
+    FALLBACK --> XB
+
+    style KS fill:#ffe4b5
+    style PW fill:#c8e6c9
+```
+
+核心：**每桌面只用最轻专用通道**；KWin ScreenShot2 仅用于窗口级或显式
+`Only/Prefer` 指定（避免绕过 portal 授权静默抓整屏）。
+
 ## 2. 路由层（src/routing.rs）
 
 ### 2.1 SessionKind 智能感知
@@ -87,6 +124,43 @@ KDE `Auto` 整屏路由**只含 portal ScreenCast**（`[PipeWireScreencast, X11]
 
 预检同时暴露为 `auth::verify_saved_token()`，调用程序可主动调用
 （如录制启动前）。
+
+### 3.3 授权时序（交互 → 持久化 → 无头恢复）
+
+```mermaid
+sequenceDiagram
+    participant App as 调用方应用
+    participant Core as dracopho-capture-core
+    participant Portal as xdg-desktop-portal
+    participant Store as PermissionStore
+
+    rect rgb(220, 240, 255)
+    Note over App,Store: 首次（交互会话，allow_interactive_portal=true）
+    App->>Core: capture_frame
+    Core->>Portal: CreateSession / SelectSources
+    Portal-->>App: 弹出 ScreenCast 选择器
+    App-->>Portal: 用户同意
+    Portal-->>Core: Start → restore_token
+    Core->>Core: 保存 token（0600，跨重启）
+    end
+
+    rect rgb(255, 250, 220)
+    Note over App,Store: 无头恢复（allow_interactive_portal=false）
+    App->>Core: capture_frame（新进程）
+    Core->>Store: Lookup(screencast, token)
+    alt token 有效且权限授予
+        Store-->>Core: 通过
+        Core->>Portal: Start(token) 静默恢复
+        Portal-->>Core: 流就绪 → 取帧
+    else token 失效/权限撤销/显示器拔线
+        Store-->>Core: 拒绝
+        Core-->>App: 报错"re-run --authorize"（绝不弹窗）
+    end
+    end
+```
+
+预检（PermissionStore 查询）在无头 `Start` **之前**执行，从机制上保证
+失效 token 绝不会触发合成器选择器。
 
 ## 4. 捕获语义
 

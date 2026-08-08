@@ -100,7 +100,10 @@ NV-GLX server 扩展可建立：
   只读）→ "No suitable DRM devices"；
 - `kwin_wayland --virtual`：EGL layer 缓冲分配（GBM dumb / `/dev/udmabuf`）被
   cgroup 设备过滤拦截 → "Rendering a layer failed"。
-- 均为宿主 GPU 配置限制，**非库代码缺陷**；KWin GPU 合成需 `modeset=Y` 实例。
+- 均为宿主 GPU 配置限制，**非库代码缺陷**；
+- **这些限制已被 §4.4 突破绕过**：装完整 Xorg + NVIDIA 用户态 xorg 模块
+  （`nvidia_drv.so` + `libglxserver_nvidia.so`）即可建立 NV-GLX server 扩展，
+  KWin 屏幕级合成也走真实 GPU，`modeset=Y` 非必需（详见 §4.4）。
 
 ## 5. Python 绑定（GPU 服务器 KDE 会话）
 

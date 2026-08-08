@@ -74,8 +74,10 @@ PASS=11 FAIL=0 SKIP=1  (SKIP=无 XWayland 窗口的环境条件)
 
 **诚实判定**：这两条是**宿主 GPU 配置限制**（`nvidia_drm modeset=N` + cgroup
 仅放行少数设备节点），非库代码缺陷。证据链完整：设备白名单逐节点验证、
-DRM ioctl 返回码、模块参数只读。KWin GPU 合成需 `nvidia_drm modeset=Y`
-或可访问 `/dev/udmabuf` 的实例。
+DRM ioctl 返回码、模块参数只读。
+**注意**：这些限制已被 §7 的完整 Xorg + NVIDIA 用户态 xorg 模块方案绕过
+（`modeset=Y` 非必需，见 §7），本节记录的是 `--drm`/`--virtual` 两条
+Wayland 原生后端路径的宿主约束。
 
 ## 5. 结论（被 §7 全面超越）
 
@@ -153,6 +155,31 @@ nohup kwin_x11 --replace ...   # OpenGL renderer: Tesla T4/PCIe/SSE2
 实测证明 **`modeset=Y` 并非必需**——通过装完整 Xorg 并加载 NVIDIA 用户态
 xorg 模块（不装内核模块、无需 `CAP_SYS_MODULE`），NV-GLX server 扩展可建立，
 CaptureArea 也在真 GPU 合成下通过。
+
+### 7.0 突破路径总览
+
+```mermaid
+flowchart LR
+    subgraph DeadEnd["❌ 死路（宿主限制）"]
+        A["kwin_wayland --drm"] -->|"T4 无 KMS\nmodeset=N"| X1["No suitable DRM devices"]
+        B["kwin_wayland --virtual"] -->|"GBM dumb / udmabuf\n被 cgroup 拦截"| X2["Rendering a layer failed"]
+        C["Xvnc（TigerVNC）"] -->|"无 Xorg 模块加载器\n无法加载 libglxserver"| X3["KWin GL_OUT_OF_MEMORY 崩溃"]
+    end
+
+    subgraph Breakthrough["✅ 突破：完整 Xorg + NVIDIA 用户态 xorg 模块"]
+        D["apt install xserver-xorg-core"] --> E["部署 nvidia_drv.so\n+ libglxserver_nvidia.so\n（与内核驱动同版本）"]
+        E --> F["Xorg :8 -config\nDriver nvidia + AllowEmptyInitialConfiguration"]
+        F --> G["NV-GLX server 扩展建立\nVirtual screen 2560x1600"]
+        G --> H["KWin renderer = Tesla T4"]
+        H --> I["CaptureArea ✅\nCaptureWindow ✅\nPASS=11"]
+    end
+
+    style A fill:#ffcdd2
+    style B fill:#ffcdd2
+    style C fill:#ffcdd2
+    style G fill:#c8e6c9
+    style I fill:#c8e6c9
+```
 
 ### 7.1 步骤
 
