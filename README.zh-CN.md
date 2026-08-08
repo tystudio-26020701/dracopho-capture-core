@@ -304,6 +304,14 @@ dracopho-capture --capture-to dir --window VSCodium --window mark-shot \
 
 > CLI 为验证与调试用途，正确的库调用方式见上文 API 与集成指南。
 
+## 工程技术报告
+
+完整工程技术文档见
+[`docs/engineering-report/`](docs/engineering-report/README.md)：架构与路由
+设计、Python 绑定设计与 API 映射、完整验证矩阵（CLI / KDE / NVIDIA GPU /
+Python / 单元测试）、KWin 6 + NVIDIA GPU 深度验证与诚实环境结论、
+构建与发布最佳实践。
+
 ## KDE Plasma 实机回归
 
 KDE 专属路径（KWin ScreenShot2 窗口级/区域、KWin scripting 窗口枚举、
@@ -416,6 +424,8 @@ src/
   bin/dracopho_capture.rs CLI 验证工具
 examples/
   integration_demo.rs     库 API 集成示例
+docs/
+  engineering-report/     工程技术报告（架构/Python/验证矩阵/KWin6+GPU/最佳实践）
 python/                   PyO3 绑定（maturin；模块 dracopho_capture_core）
   src/lib.rs              绑定实现
   tests/test_api.py       Python API 测试

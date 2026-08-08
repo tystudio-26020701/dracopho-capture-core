@@ -338,6 +338,14 @@ dracopho-capture --capture-to dir --window VSCodium --window mark-shot \
 > The CLI is for verification and debugging; see the API and Integration Guide
 > above for the proper library usage.
 
+## Engineering Report
+
+See [`docs/engineering-report/`](docs/engineering-report/README.md) for the
+full engineering documentation: architecture & routing design, Python binding
+design & API mapping, the complete verification matrix (CLI / KDE / NVIDIA GPU /
+Python / unit tests), the KWin 6 + NVIDIA GPU deep-dive with honest
+environment conclusions, and build/release best practices.
+
 ## KDE Plasma 实机回归
 
 KDE 专属路径（KWin ScreenShot2 窗口级/区域、KWin scripting 窗口枚举、
@@ -453,6 +461,8 @@ src/
   bin/dracopho_capture.rs CLI verification tool
 examples/
   integration_demo.rs     library API integration example
+docs/
+  engineering-report/     engineering report (architecture / python / verification matrix / KWin6+GPU / best practices)
 python/                   PyO3 bindings (maturin; module dracopho_capture_core)
   src/lib.rs              binding implementations
   tests/test_api.py       Python API tests
