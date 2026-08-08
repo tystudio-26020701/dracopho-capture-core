@@ -321,8 +321,14 @@ pub fn capture_outputs(request: &CaptureRequest) -> Vec<CaptureResult> {
     for name in names {
         let mut req = request.clone();
         req.all_outputs = false;
-        req.preferred_output = Some(name);
-        let result = capture_frame(&req);
+        req.preferred_output = Some(name.clone());
+        let mut result = capture_frame(&req);
+        // 后端对 preferred_output 的 output_name 回填不一致（x11/pipewire 返回
+        // None）；capture_outputs 的契约是"每个 result 用 output_name 标识屏幕"，
+        // 故在此统一补齐，保证调用方能按屏幕名区分。
+        if result.output_name.is_none() {
+            result.output_name = Some(name.clone());
+        }
         // PipeWire 会话按 preferred_output 绑定单流：多屏之间重置共享会话，
         // 让每个屏幕用新会话匹配自身的流（恢复 token 静默）。
         if result.backend == Backend::PipeWireScreencast {

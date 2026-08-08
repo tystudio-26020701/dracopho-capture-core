@@ -732,5 +732,9 @@ fn dracopho_capture_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(verify_saved_token, m)?)?;
     m.add_function(wrap_pyfunction!(verify_restore_token, m)?)?;
     m.add_function(wrap_pyfunction!(stop_active_stream, m)?)?;
+
+    // 模块级常量（与 Rust 库 capture_types 对齐）。
+    m.add("DRM_FORMAT_MOD_INVALID", capture_types::DRM_FORMAT_MOD_INVALID)?;
+    m.add("DRM_FORMAT_MOD_LINEAR", capture_types::DRM_FORMAT_MOD_LINEAR)?;
     Ok(())
 }

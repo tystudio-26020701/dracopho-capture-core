@@ -13,6 +13,31 @@ import tempfile
 import dracopho_capture_core as d
 
 
+def test_module_constants():
+    assert d.DRM_FORMAT_MOD_INVALID == 0x00ff_ffff_ffff_ffff
+    assert d.DRM_FORMAT_MOD_LINEAR == 0
+    assert hasattr(d, "detect_routing")
+    assert hasattr(d, "capture_frame")
+    assert hasattr(d, "capture_outputs")
+    assert hasattr(d, "capture_windows")
+    assert hasattr(d, "start_stream")
+    assert hasattr(d, "list_windows")
+    assert hasattr(d, "list_outputs")
+    assert hasattr(d, "available_backends")
+    assert hasattr(d, "parse_match")
+    assert hasattr(d, "authorized")
+    assert hasattr(d, "restore_token")
+    assert hasattr(d, "save_restore_token")
+    assert hasattr(d, "clear_restore_token")
+    assert hasattr(d, "verify_saved_token")
+    assert hasattr(d, "verify_restore_token")
+    assert hasattr(d, "stop_active_stream")
+    for cls in ("CaptureRequest", "CaptureResult", "WindowCapture",
+                "RouteMode", "WindowMatch", "WindowInfo", "OutputInfo",
+                "RoutingPlan", "Stream"):
+        assert hasattr(d, cls), f"missing class {cls}"
+
+
 def test_routing():
     plan = d.detect_routing()
     assert plan.session in (
