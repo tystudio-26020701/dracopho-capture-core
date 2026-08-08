@@ -77,14 +77,15 @@ PASS=11 FAIL=0 SKIP=1  (SKIP=无 XWayland 窗口的环境条件)
 DRM ioctl 返回码、模块参数只读。KWin GPU 合成需 `nvidia_drm modeset=Y`
 或可访问 `/dev/udmabuf` 的实例。
 
-## 5. 结论
+## 5. 结论（被 §7 全面超越）
 
 1. **库功能全链路已验证**：KWin 6.7.2（Debian sid 构建，与 neon 构建交叉
    验证）+ NVIDIA 服务器上，ScreenShot2 窗口级/区域/多窗口/组件/Python 绑定
    全部通过，像素真实（非黑图）。
 2. **NVIDIA GPU 真实可用**：EGL 离屏渲染读回纯红像素。
-3. **KWin GPU 合成**受宿主限制，如实记录；一旦有 `modeset=Y` 实例，
-   `scripts/kde_regression.sh --force-kde` 可直接复验。
+3. 原判定"KWin GPU 合成需宿主 `modeset=Y`"——§7 实测**证明非必需**：
+   装完整 Xorg + NVIDIA 用户态 xorg 模块即可建立 NV-GLX，屏幕级 CaptureArea
+   也在真 GPU 合成下通过（PASS=11 全绿）。
 
 ## 6. 远程桌面（Xvnc）路线：CaptureWindow 在真实 NVIDIA 合成下验证通过
 
@@ -137,12 +138,86 @@ nohup kwin_x11 --replace ...   # OpenGL renderer: Tesla T4/PCIe/SSE2
 | 能力 | NVIDIA GPU 合成（Xvnc） | Mesa llvmpipe（稳定路径） |
 | --- | --- | --- |
 | **CaptureWindow by-UUID（窗口对象级）** | ✅ 稳定成功（离屏渲染） | ✅ |
-| CaptureArea / CaptureWorkspace（屏幕级） | ❌ X server 无 NV-GLX server 扩展 | ✅ PASS=11 |
+| CaptureArea / CaptureWorkspace（屏幕级） | ❌ Xvnc 无 NV-GLX server 扩展 | ✅ PASS=11 |
 | 完整回归 | — | ✅ PASS=11 FAIL=0 SKIP=1 |
 
 - **远程桌面路线确认可行**，且窗口对象级抓取（本库 KDE 窗口截图的核心能力）
   已在真实 NVIDIA GPU 合成下验证通过；
-- **屏幕级合成需 X server 提供 NVIDIA GLX server 扩展**——这需要宿主配置
-  `nvidia_drm modeset=Y` 或从 NVIDIA 驱动加载 xorg GLX module（容器无
-  `CAP_SYS_MODULE`，无法安装），属宿主边界，非库缺陷；
-- 屏幕级捕获在 llvmpipe 稳定路径下已充分验证（像素真实、全链路 PASS）。
+- **屏幕级合成需 X server 提供 NVIDIA GLX server 扩展**——Xvnc（TigerVNC）
+  无 Xorg 模块加载器（实测无 `xf86LoadModule`/`LoadModule` 符号），无法加载
+  `libglxserver_nvidia.so` → KWin `GL_OUT_OF_MEMORY` + `No provider of
+  glXBindTexImageEXT` → 崩溃。
+
+## 7. 决定性突破：完整 Xorg + NVIDIA GLX server → 屏幕级也走真 GPU
+
+实测证明 **`modeset=Y` 并非必需**——通过装完整 Xorg 并加载 NVIDIA 用户态
+xorg 模块（不装内核模块、无需 `CAP_SYS_MODULE`），NV-GLX server 扩展可建立，
+CaptureArea 也在真 GPU 合成下通过。
+
+### 7.1 步骤
+
+```bash
+# 1) 装完整 Xorg server（有模块加载器，noble 源）
+apt-get install -y --no-install-recommends xserver-xorg-core
+
+# 2) 从 NVIDIA apt 仓库下载并部署用户态 xorg 模块（版本须与内核驱动一致 580.65.06）
+#    nvidia-driver-580-open_580.65.06 + libnvidia-gl-580_580.65.06
+dpkg-deb -x libnvidia-gl-580_580.65.06-0ubuntu1_amd64.deb /tmp/nv-gl
+cp /tmp/nv-gl/usr/lib/x86_64-linux-gnu/nvidia/xorg/libglxserver_nvidia.so.580.65.06 \
+      /usr/lib/xorg/modules/extensions/libglx.so      # 替换 X.Org 自带 libglx
+dpkg-deb -x xserver-xorg-video-nvidia-580_580.65.06-0ubuntu1_amd64.deb /tmp/xv-nv
+cp /tmp/xv-nv/usr/lib/x86_64-linux-gnu/nvidia/xorg/nvidia_drv.so \
+      /usr/lib/xorg/modules/drivers/
+
+# 3) xorg.conf：NVIDIA 驱动 + 空显示初始化
+cat > /etc/X11/xorg.conf <<'EOF'
+Section "ServerFlags"
+    Option "AllowEmptyInitialConfiguration" "true"
+EndSection
+Section "Files"
+    ModulePath "/usr/lib/x86_64-linux-gnu/nvidia/xorg,/usr/lib/xorg/modules"
+EndSection
+Section "Device"
+    Identifier "nvidia"
+    Driver "nvidia"
+EndSection
+Section "Screen"
+    Identifier "Screen0"
+    Device "nvidia"
+EndSection
+EOF
+
+# 4) 启动 Xorg（NVIDIA GLX server），X socket :8
+nohup Xorg :8 -config /etc/X11/xorg.conf -noreset &
+
+# 5) 验证 NV-GLX 扩展 + renderer
+DISPLAY=:8 glxinfo | grep renderer
+# OpenGL renderer string: Tesla T4/PCIe/SSE2
+# server glx vendor string: NVIDIA Corporation
+# 日志: Initializing extension NV-GLX
+```
+
+### 7.2 关键证据
+
+| 检查 | 结果 |
+| --- | --- |
+| Xorg 加载 NVIDIA 驱动模块 | ✅ `NVIDIA dlloader X Driver 580.65.06` |
+| Xorg 加载 NVIDIA GLX server | ✅ `Module glx: vendor="NVIDIA Corporation"` + `Initializing extension NV-GLX` |
+| NVIDIA 虚拟屏幕建立 | ✅ `NVIDIA(0): Virtual screen size determined to be 2560 x 1600` |
+| KWin renderer | ✅ `OpenGL renderer string: Tesla T4/PCIe/SSE2` |
+| **CaptureArea（之前唯一失败项）** | ✅ **`captured: /tmp/gpu-area3.png (400x300) via kwin-screenshot2`** |
+| CaptureWindow by-UUID | ✅ `[object]` 422x318 |
+| KWin 稳定性 | ✅ 无 `GL_OUT_OF_MEMORY` 崩溃 |
+| 完整回归 | ✅ **PASS=11 FAIL=0 SKIP=1** |
+| Python 绑定 capture_frame | ✅ 300x200 PNG 1768B |
+
+### 7.3 最终结论（更新）
+
+1. **库全链路在真实 NVIDIA GPU 合成下全部通过**：CaptureWindow（离屏渲染）
+   与 CaptureArea/CaptureWorkspace（屏幕级合成）都走 Tesla T4 渲染，像素真实。
+2. **`modeset=Y` 非必需**：加载 NVIDIA 用户态 xorg 模块（`nvidia_drv.so` +
+   `libglxserver_nvidia.so`，与内核驱动同版本）即可建立 NV-GLX server 扩展，
+   无需内核模块操作（容器无 `CAP_SYS_MODULE` 也能完成）。
+3. **可复现性**：以上为纯用户态配置（apt + deb 解包 + xorg.conf），可写入
+   部署脚本在任意 autodl 实例复现；`scripts/kde_regression.sh --force-kde`
+   在 `DISPLAY=:8` 下 PASS=11 全绿。

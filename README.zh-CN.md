@@ -348,17 +348,12 @@ zenity 原生窗口上验证（PASS=12 FAIL=0）。缺 EGL 环境变量时 KWin 
 | 窗口枚举 / `CaptureWindow` by-UUID `[object]` / `CaptureArea` / 多窗口 / 组件子区域 | ✅ |
 | Python 绑定（abi3 wheel）在 KDE 会话下全功能 | ✅ |
 
-**KWin DRM 后端 + 虚拟输出的诚实结论**：此 GPU 实例宿主配置
-`nvidia_drm modeset=N`（模块参数只读，容器无法更改），且容器仅放行
-`/dev/dri/card2`(226:2) 与 `/dev/dri/renderD129`(226:129)，`/dev/udmabuf`
-与其余 render 节点被 cgroup 设备过滤拦截。因此：
-- `kwin_wayland --drm` 因 T4 无 KMS 模式设置（`drmIsKMS` 失败）→
-  "No suitable DRM devices"；
-- `kwin_wayland --virtual` 的 EGL layer 缓冲分配（GBM dumb / udmabuf）被拒 →
-  "Rendering a layer failed"。
-这两条是宿主 GPU 配置限制，**非库代码缺陷**；KWin GPU 合成需
-`nvidia_drm modeset=Y`（或可用 `/dev/udmabuf`）的实例。NVIDIA EGL 本身可用，
-X11 后端 + 软件合成的完整功能链路已充分验证。
+**NVIDIA GPU 合成（完整 Xorg + GLX server，无需 modeset=Y）**：`modeset=Y`
+并非必需——`scripts/gpu_glx_xorg_setup.sh` 装完整 Xorg 并加载 NVIDIA 用户态
+xorg 模块（`nvidia_drv.so` + `libglxserver_nvidia.so`，与内核驱动同版本），
+建立 NV-GLX server 扩展后，KWin 屏幕级合成（CaptureArea/CaptureWorkspace）
+也走真实 GPU。Tesla T4 上实测：renderer=Tesla T4，CaptureArea 400x300、
+CaptureWindow `[object]` 422x318 真实出图，完整回归 PASS=11 FAIL=0。
 
 脚本覆盖：会话分类（wayland-kde）、能力探测含 kwin-screenshot2、整屏链不含
 kwin-screenshot2（portal 授权门保留）、输出/窗口枚举（UUID + XWayland 0x 桥接）、

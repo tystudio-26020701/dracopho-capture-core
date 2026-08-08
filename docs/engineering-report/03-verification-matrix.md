@@ -74,10 +74,27 @@ auth token 持久化、KWin JSON 解析、QImage 格式转换/预乘反预乘、
 | Xvnc 加载 NVIDIA GLX（`__GLX_VENDOR_LIBRARY_NAME=nvidia`） | ✅ `Tesla T4/PCIe/SSE2` / OpenGL 4.6.0 NVIDIA 580.65.06 |
 | KWin 以 NVIDIA GLX 启动（renderer=Tesla T4） | ✅ |
 | **CaptureWindow by-UUID（离屏渲染）在 NVIDIA 下** | ✅ 连续 3 次稳定 `[object]`，像素真实（240,240,240） |
-| CaptureArea（屏幕级，需 X server NV-GLX 扩展） | ❌ Xvnc 软件 server 无 NV-GLX → KWin 崩溃（宿主边界） |
-| CaptureArea/CaptureWorkspace（Mesa llvmpipe 稳定路径） | ✅ PASS=11 |
+| CaptureArea（屏幕级，需 X server NV-GLX 扩展） | ❌ Xvnc 无模块加载器 → 无法加载 libglxserver_nvidia → KWin 崩溃 |
 
-### 4.4 诚实结论（宿主限制）
+### 4.4 决定性突破：完整 Xorg + NVIDIA GLX server（屏幕级也走真 GPU）
+
+实测证明 **`modeset=Y` 非必需**：装完整 Xorg（有模块加载器）+ NVIDIA 用户态
+xorg 模块（`nvidia_drv.so` + `libglxserver_nvidia.so`，与内核驱动同版本），
+NV-GLX server 扩展可建立：
+
+| 测试项 | 结果 |
+| --- | --- |
+| Xorg 加载 NVIDIA 驱动（`NVIDIA dlloader X Driver 580.65.06`） | ✅ |
+| Xorg 加载 NVIDIA GLX server + `Initializing extension NV-GLX` | ✅ |
+| NVIDIA 虚拟屏幕（2560×1600） | ✅ |
+| KWin renderer = `Tesla T4/PCIe/SSE2` | ✅ |
+| **CaptureArea（之前唯一失败项）** | ✅ `400x300 via kwin-screenshot2` |
+| CaptureWindow by-UUID | ✅ `[object]` |
+| KWin 稳定性（无 GL_OUT_OF_MEMORY） | ✅ |
+| **完整回归** | ✅ **PASS=11 FAIL=0 SKIP=1** |
+| Python 绑定 capture_frame | ✅ 300×200 PNG 1768B |
+
+### 4.5 诚实结论（宿主限制）
 
 - `kwin_wayland --drm`：T4 无 KMS（`drmIsKMS` 失败，宿主 `nvidia_drm modeset=N`
   只读）→ "No suitable DRM devices"；

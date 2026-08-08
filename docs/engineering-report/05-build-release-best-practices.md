@@ -60,8 +60,17 @@ scripts/kde_regression.sh --no-build --force-kde
 # 真实 GPU 像素通路
 scripts/nvidia_egl_render_check.sh   # PASS: 255,0,0 纯红像素
 
-# KWin GPU 合成需宿主 nvidia_drm modeset=Y（或 /dev/udmabuf 可访问）
+# 【推荐】完整 Xorg + NVIDIA GLX server（屏幕级也走真 GPU）
+scripts/gpu_glx_xorg_setup.sh        # 自动部署 Xorg + NVIDIA xorg 模块，X :8
+export DISPLAY=:8 KWIN_SCREENSHOT_NO_PERMISSION_CHECKS=1
+kwin_x11 --replace &
+scripts/kde_regression.sh --no-build --force-kde   # PASS=11 全绿
 ```
+
+关键：**无需 `modeset=Y` / 无需内核模块操作**——装完整 Xorg（有模块加载器）
+并加载 NVIDIA 用户态 xorg 模块（`nvidia_drv.so` + `libglxserver_nvidia.so`，
+版本与内核驱动一致）即可建立 NV-GLX server 扩展，KWin 屏幕级合成
+（CaptureArea/CaptureWorkspace）也走真实 GPU（实测 Tesla T4 renderer）。
 
 ## 5. 集成指南（宿主应用，如 mark-shot）
 
@@ -91,7 +100,7 @@ scripts/nvidia_egl_render_check.sh   # PASS: 255,0,0 纯红像素
 
 | 边界 | 说明 |
 | --- | --- |
-| KWin GPU 合成 | 需宿主 `nvidia_drm modeset=Y` 或 `/dev/udmabuf`；无头 llvmpipe 下功能链路已验证 |
-| CaptureWindow by-UUID 像素 | 在 KWin 6.7.2 软件合成下已实证真实出图；GPU 合成实例待复验 |
+| KWin GPU 合成 | 已解决：完整 Xorg + NVIDIA xorg 模块（`gpu_glx_xorg_setup.sh`），CaptureArea 也走真 GPU |
+| CaptureWindow by-UUID 像素 | Tesla T4 + NVIDIA GLX 下实测真实出图；回归 PASS=11 全绿 |
 | Wayland 整屏组合 | portal 无虚拟桌面整流，`all_outputs=true` 报错引导 `capture_outputs` |
 | GNOME 窗口对象 | 无 XComposite，回退区域裁剪（`object_capture=false` 如实标注） |
