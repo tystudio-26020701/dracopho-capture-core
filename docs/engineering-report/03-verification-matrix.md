@@ -64,7 +64,20 @@ auth token 持久化、KWin JSON 解析、QImage 格式转换/预乘反预乘、
 | 组件子区域（120×80 裁剪） | ✅ |
 | 完整回归 | ✅ **PASS=11 FAIL=0 SKIP=1** |
 
-### 4.3 诚实结论（宿主限制）
+### 4.3 远程桌面（Xvnc + NVIDIA GLX）路线
+
+用户指引"autodl 允许安装远程桌面做可视化操作"——实测可行并取得突破：
+
+| 测试项 | 结果 |
+| --- | --- |
+| 安装并启动 Xvnc（TigerVNC，:1，VNC 5901） | ✅ |
+| Xvnc 加载 NVIDIA GLX（`__GLX_VENDOR_LIBRARY_NAME=nvidia`） | ✅ `Tesla T4/PCIe/SSE2` / OpenGL 4.6.0 NVIDIA 580.65.06 |
+| KWin 以 NVIDIA GLX 启动（renderer=Tesla T4） | ✅ |
+| **CaptureWindow by-UUID（离屏渲染）在 NVIDIA 下** | ✅ 连续 3 次稳定 `[object]`，像素真实（240,240,240） |
+| CaptureArea（屏幕级，需 X server NV-GLX 扩展） | ❌ Xvnc 软件 server 无 NV-GLX → KWin 崩溃（宿主边界） |
+| CaptureArea/CaptureWorkspace（Mesa llvmpipe 稳定路径） | ✅ PASS=11 |
+
+### 4.4 诚实结论（宿主限制）
 
 - `kwin_wayland --drm`：T4 无 KMS（`drmIsKMS` 失败，宿主 `nvidia_drm modeset=N`
   只读）→ "No suitable DRM devices"；

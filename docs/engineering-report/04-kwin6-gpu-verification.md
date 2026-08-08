@@ -85,3 +85,64 @@ DRM ioctl 返回码、模块参数只读。KWin GPU 合成需 `nvidia_drm modese
 2. **NVIDIA GPU 真实可用**：EGL 离屏渲染读回纯红像素。
 3. **KWin GPU 合成**受宿主限制，如实记录；一旦有 `modeset=Y` 实例，
    `scripts/kde_regression.sh --force-kde` 可直接复验。
+
+## 6. 远程桌面（Xvnc）路线：CaptureWindow 在真实 NVIDIA 合成下验证通过
+
+用户提出 autodl 允许安装远程桌面进行可视化桌面操作——实测确认可行，且
+取得了突破：
+
+### 6.1 环境
+
+```bash
+apt-get install -y tigervnc-standalone-server
+Xvnc :1 -geometry 1920x1080 -depth 24 -SecurityTypes none -localhost no \
+      +extension GLX +render -ac &      # VNC 端口 5901
+```
+
+Xvnc 提供**真实的 X server**（区别于 Xvfb），支持 GLX 扩展。
+
+### 6.2 NVIDIA GLX 可加载
+
+```bash
+export DISPLAY=:1 __GLX_VENDOR_LIBRARY_NAME=nvidia
+glxinfo | grep renderer
+# OpenGL renderer string: Tesla T4/PCIe/SSE2     ← NVIDIA 渲染器！
+# OpenGL version string: 4.6.0 NVIDIA 580.65.06
+```
+
+### 6.3 关键成果：CaptureWindow 在真实 NVIDIA GPU 合成下稳定成功
+
+```bash
+# KWin 以 NVIDIA GLX 启动（renderer=Tesla T4），ScreenShot2 可用
+nohup kwin_x11 --replace ...   # OpenGL renderer: Tesla T4/PCIe/SSE2
+
+# 窗口对象级抓取（CaptureWindow by-UUID）连续 3 次稳定 [object]：
+[0] selector=Stab1 -> Stab1-0.png (310x206) [object]
+[0] selector=Stab2 -> Stab2-0.png (310x206) [object]
+[0] selector=Stab3 -> Stab3-0.png (310x206) [object]
+# 像素真实：中心 240,240,240（KWin 默认窗口背景）
+```
+
+**为什么 CaptureWindow 成功而 CaptureArea 崩溃**：
+
+- `CaptureWindow` 走 **KWin 离屏渲染**（fbo + glReadPixels 读回），不依赖
+  X server 的 GLX 呈现扩展 → 在 NVIDIA GPU 上稳定工作；
+- `CaptureArea`/`CaptureWorkspace` 需要把 GPU 合成结果**呈递到 X 窗口**
+  （`glXBindTexImageEXT` / GLX sync），而 Xvnc 的 X server 是**软件渲染**
+  （无 `NV-GLX` server 扩展）→ KWin 报 `GL_OUT_OF_MEMORY` + `No provider of
+  glXBindTexImageEXT` → 崩溃。
+
+### 6.4 诚实结论（远程桌面路线）
+
+| 能力 | NVIDIA GPU 合成（Xvnc） | Mesa llvmpipe（稳定路径） |
+| --- | --- | --- |
+| **CaptureWindow by-UUID（窗口对象级）** | ✅ 稳定成功（离屏渲染） | ✅ |
+| CaptureArea / CaptureWorkspace（屏幕级） | ❌ X server 无 NV-GLX server 扩展 | ✅ PASS=11 |
+| 完整回归 | — | ✅ PASS=11 FAIL=0 SKIP=1 |
+
+- **远程桌面路线确认可行**，且窗口对象级抓取（本库 KDE 窗口截图的核心能力）
+  已在真实 NVIDIA GPU 合成下验证通过；
+- **屏幕级合成需 X server 提供 NVIDIA GLX server 扩展**——这需要宿主配置
+  `nvidia_drm modeset=Y` 或从 NVIDIA 驱动加载 xorg GLX module（容器无
+  `CAP_SYS_MODULE`，无法安装），属宿主边界，非库缺陷；
+- 屏幕级捕获在 llvmpipe 稳定路径下已充分验证（像素真实、全链路 PASS）。
